@@ -1,0 +1,14 @@
+{
+  "tasks": {
+    "check": "deno check src/delegate.ts src/delegate.test.ts src/codex.test.ts",
+    "test": "deno test --allow-read --allow-write --allow-env --allow-run=git,jj src/",
+    "verify": {
+      "dependencies": ["check", "test"]
+    }
+  },
+  "lint": {
+    "rules": {
+      "exclude": ["no-import-prefix"]
+    }
+  }
+}
