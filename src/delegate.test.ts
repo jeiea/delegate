@@ -4,6 +4,7 @@ import { createTempDir } from "jsr:@jeiea/snippets@0.2.0";
 import { runDelegate } from "./delegate.ts";
 import { exitCode } from "./document.ts";
 import { fakeExec, type FakeResponse } from "./fakes.ts";
+import { claudeTrustKeys } from "./herdr.ts";
 import { denoExec } from "./process.ts";
 
 const codexId = "019efcf8-381f-74a2-a141-f105f1e00e81";
@@ -2554,6 +2555,240 @@ Deno.test("허더 연결 위치가 없거나 상대 경로이면 위임을 시�
 
 // Herdr claude prompt
 
+Deno.test("클로드 신뢰 항목은 현재 선택 위치에 맞춰 인접한 항목만 수락한다", () => {
+  assertEquals(claudeTrustKeys("❯ No, exit\n  Yes, I trust this folder\n"), [
+    "down",
+    "enter",
+  ]);
+  assertEquals(claudeTrustKeys("  Yes, I trust this folder\n❯ No, exit\n"), [
+    "up",
+    "enter",
+  ]);
+  assertEquals(claudeTrustKeys("❯ Yes, I trust this folder\n  No, exit\n"), [
+    "enter",
+  ]);
+  for (
+    const screen of [
+      "Trust this folder?",
+      "  No, exit\n  Yes, I trust this folder\n",
+      "❯ Other approval\n  Yes, I trust this folder\n",
+      "❯ No, exit\n  Other option\n  Yes, I trust this folder\n",
+      "  Yes, I trust this folder\n\n❯ No, exit\n",
+    ]
+  ) {
+    assertEquals(claudeTrustKeys(screen), undefined, screen);
+  }
+});
+
+Deno.test("클로드 신뢰 수락 중 취소되거나 전체 시간이 만료되면 중단 원인을 알리고 패널을 정리한다", async (t) => {
+  for (const interruption of ["cancelled", "timeout", "deadline"] as const) {
+    await t.step(interruption, async () => {
+      await using dir = await createTempDir({ prefix: "delegate-test-" });
+      const controller = new AbortController();
+      let now = 0;
+      const test = setup(dir.path, "작업", [
+        ...newTabAllocation(),
+        herdrError("agent_not_ready", "Trust required"),
+        ...(interruption === "timeout"
+          ? [{ cmd: "herdr", waitForAbort: true }]
+          : [
+            {
+              cmd: "herdr",
+              stdout: "❯ No, exit\n  Yes, I trust this folder\n",
+            },
+            herdr({}, {
+              onStart: () => {
+                if (interruption === "deadline") now = 100;
+              },
+            }),
+            ...(interruption === "deadline" ? [] : [{
+              cmd: "herdr",
+              waitForAbort: true,
+              onStart: () => controller.abort(),
+            }]),
+          ]),
+        herdr({}),
+      ], {
+        env: { HERDR_ENV: "1" },
+        signal: controller.signal,
+        now: () => now,
+      });
+      const result = await runDelegate([
+        "prompt",
+        "--agent",
+        "claude",
+        "--caller-id",
+        "caller",
+        "--timeout",
+        "100ms",
+      ], test.deps);
+      const code = interruption === "cancelled" ? "cancelled" : "timeout";
+      assertEquals(result.code, exitCode(code), result.stdout);
+      assertStringIncludes(result.stdout, `code: ${code}`);
+      const start = test.fake.calls.find((call) => call.args[1] === "start")!;
+      const id = start.args.find((arg) => arg.startsWith("--session-id="))!
+        .slice(13);
+      assertStringIncludes(result.stdout, `session_id: ${id}`);
+      assertEquals(test.fake.calls.at(-1)?.args, [
+        "pane",
+        "close",
+        "pane-delegate",
+      ]);
+      assertEquals(
+        test.fake.calls.some((call) => call.args[1] === "prompt"),
+        false,
+      );
+      assertEquals(
+        test.fake.calls.some((call) => call.args[1] === "wait"),
+        interruption === "cancelled",
+      );
+    });
+  }
+});
+
+Deno.test("클로드는 모든 권한 모드에서 폴더 신뢰를 한 번 수락하고 준비된 뒤 요청을 제출한다", async () => {
+  for (
+    const { permission, timeout, remaining } of [
+      {
+        permission: "read-only",
+        timeout: "2s",
+        remaining: "1750",
+      },
+      {
+        permission: "write",
+        timeout: "60s",
+        remaining: "30000",
+      },
+    ]
+  ) {
+    await using dir = await createTempDir({ prefix: "delegate-test-" });
+    let now = 0;
+    const test = setup(dir.path, "작업", [
+      ...newTabAllocation(),
+      herdrError("agent_not_ready", "Trust required"),
+      { cmd: "herdr", stdout: "❯ No, exit\n  Yes, I trust this folder\n" },
+      herdr({}, {
+        onStart: () => {
+          now = 250;
+        },
+      }),
+      herdr({ agent: unidentifiedClaude("idle", 1) }),
+      herdr({ agent: unidentifiedClaude("working", 2) }, {
+        onStart: () => {
+          const start = test.fake.calls.find((call) =>
+            call.args[1] === "start"
+          )!;
+          const id = start.args.find((arg) => arg.startsWith("--session-id="))!
+            .slice(13);
+          writeJsonl(claudePath(dir.path, id), [
+            ...claudeOpen(`${prefix}작업`, id),
+            {
+              type: "assistant",
+              sessionId: id,
+              cwd,
+              requestId: "req-final",
+              isSidechain: false,
+              message: {
+                role: "assistant",
+                content: [{ type: "text", text: "완료" }],
+              },
+            },
+            { type: "system", subtype: "turn_duration", sessionId: id, cwd },
+          ]);
+        },
+      }),
+      herdr({ agent: unidentifiedClaude("working", 2) }),
+      herdr({}),
+      herdr({ agent: unidentifiedClaude("done", 3) }),
+      herdr({ agent: unidentifiedClaude("done", 3) }),
+      herdr({}),
+    ], { env: { HERDR_ENV: "1" }, now: () => now });
+    const result = await runDelegate([
+      "prompt",
+      "--agent",
+      "claude",
+      "--caller-id",
+      "caller",
+      "--permission",
+      permission,
+      "--timeout",
+      timeout,
+    ], test.deps);
+    assertEquals(result.code, 0, result.stdout);
+    assertStringIncludes(result.stdout, "\n\n완료\n");
+    const name = test.fake.calls.find((call) =>
+      call.args[1] === "start"
+    )!.args[2];
+    assertEquals(test.fake.calls.slice(4, 7).map((call) => call.args), [
+      ["pane", "read", "pane-delegate", "--source", "visible"],
+      ["agent", "send-keys", name, "down", "enter"],
+      [
+        "agent",
+        "wait",
+        name,
+        "--until",
+        "idle",
+        "--timeout",
+        remaining,
+      ],
+    ]);
+    assertEquals(test.fake.calls[7]?.args.slice(0, 4), [
+      "agent",
+      "prompt",
+      name,
+      `${prefix}작업`,
+    ]);
+    assertEquals(
+      test.fake.calls.filter((call) => call.args[1] === "send-keys").length,
+      1,
+    );
+  }
+});
+
+Deno.test("클로드 폴더 신뢰 수락 후에도 차단되거나 실패하면 요청을 보류하고 현재 화면을 보여준다", async () => {
+  for (const outcome of ["blocked", "timeout"] as const) {
+    await using dir = await createTempDir({ prefix: "delegate-test-" });
+    const test = setup(dir.path, "작업", [
+      ...newTabAllocation(),
+      herdrError("agent_not_ready", "Trust required"),
+      { cmd: "herdr", stdout: "❯ No, exit\n  Yes, I trust this folder\n" },
+      herdr({}),
+      outcome === "blocked"
+        ? herdr({ agent: unidentifiedClaude("blocked", 1) })
+        : herdrError("timeout", "wait expired"),
+      herdr({
+        agent: {
+          ...unidentifiedClaude("blocked", 1),
+          pane_id: "pane-delegate",
+        },
+      }),
+      { cmd: "herdr", stdout: "Current blocked screen\n" },
+    ], { env: { HERDR_ENV: "1" } });
+    const result = await runDelegate([
+      "prompt",
+      "--agent",
+      "claude",
+      "--caller-id",
+      "caller",
+    ], test.deps);
+    assertEquals(result.code, 4, outcome);
+    assertStringIncludes(result.stdout, "code: agent_blocked");
+    assertStringIncludes(result.stdout, "prompt를 제출하지 않았습니다");
+    assertStringIncludes(result.stdout, "pane_id: pane-delegate");
+    assertStringIncludes(result.stdout, "Current blocked screen");
+    assertEquals(
+      test.fake.calls.filter((call) => call.args[1] === "send-keys").length,
+      1,
+    );
+    assertEquals(
+      test.fake.calls.some((call) =>
+        ["prompt", "close"].includes(call.args[1])
+      ),
+      false,
+    );
+  }
+});
+
 Deno.test("허더에서 클로드 작업을 시작하면 지정한 이름과 추론 강도를 적용하고 발급한 세션과 다른 응답은 거부한다", async () => {
   await using dir = await createTempDir({ prefix: "delegate-test-" });
   const test = setup(dir.path, "화면 작업", [
@@ -2699,6 +2934,7 @@ Deno.test("클로드 시작에 승인이 필요하면 기록이 생기기 전에
   const started = setup(dir.path, "작업", [
     ...newTabAllocation(),
     herdrError("agent_not_ready", "Trust required"),
+    { cmd: "herdr", stdout: "Trust this folder?\n" },
     herdr({
       agent: {
         pane_id: "pane-delegate",
@@ -2724,6 +2960,13 @@ Deno.test("클로드 시작에 승인이 필요하면 기록이 생기기 전에
   assertStringIncludes(first.stdout, `session_id: ${id}`);
   assertStringIncludes(first.stdout, "pane_id: pane-delegate");
   assertStringIncludes(first.stdout, "Trust this folder?");
+  assertEquals(first.code, 4);
+  assertEquals(
+    started.fake.calls.some((call) =>
+      ["send-keys", "prompt"].includes(call.args[1])
+    ),
+    false,
+  );
 
   for (
     const command of ["status", "wait", "logs", "close", "prompt"] as const

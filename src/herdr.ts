@@ -607,6 +607,20 @@ export async function closeHerdr(
   return document(snapshot, "not_live");
 }
 
+export function claudeTrustKeys(screen: string): string[] | undefined {
+  const lines = screen.split("\n").map((line) => line.trim());
+  const trust = lines.findIndex((line) =>
+    /^(?:❯ )?Yes, I trust this folder$/.test(line)
+  );
+  const selected = lines.findIndex((line) =>
+    /^❯ (?:No, exit|Yes, I trust this folder)$/.test(line)
+  );
+  if (trust < 0 || selected < 0 || Math.abs(trust - selected) > 1) return;
+  if (trust === selected) return ["enter"];
+  if (trust < selected) return ["up", "enter"];
+  return ["down", "enter"];
+}
+
 async function submitPrompt(
   request: HerdrPrompt,
   live: LiveAgent,
@@ -643,14 +657,7 @@ async function submitPrompt(
             "--until",
             "blocked",
             "--timeout",
-            String(
-              Math.max(
-                1,
-                Math.floor(
-                  Math.min(activityGateMs, remaining(deadline, deps)),
-                ),
-              ),
-            ),
+            activityGateTimeout(deadline, deps),
           ]
           : []),
       ],
@@ -921,12 +928,7 @@ async function startAgent(
       "--pane",
       pane.paneId,
       "--timeout",
-      String(
-        Math.max(
-          1,
-          Math.floor(Math.min(activityGateMs, remaining(deadline, deps))),
-        ),
-      ),
+      activityGateTimeout(deadline, deps),
       "--",
       ...herdrArgs,
     ]);
@@ -960,7 +962,14 @@ async function startAgent(
     }
   } catch (error) {
     const normalized = normalizeError(error);
-    if (normalized.code === "agent_blocked") {
+    if (normalized.code !== "agent_blocked") throw normalized;
+    const trusted = await acceptClaudeTrust(request, {
+      name,
+      paneId: pane.paneId,
+      deadline,
+      deps,
+    });
+    if (trusted == null) {
       throw new DelegateError(
         "agent_blocked",
         `${normalized.message}; agent start가 완료되지 않아 prompt를 제출하지 않았습니다`,
@@ -969,7 +978,7 @@ async function startAgent(
         normalized.retry,
       );
     }
-    throw normalized;
+    started = trusted;
   }
   return {
     live: mergeReportedLive({
@@ -981,6 +990,54 @@ async function startAgent(
     }, started) as ManagedPane,
     retry,
   };
+}
+
+// 영어 문구·❯ 포커스·두 선택지에 의존하는 우회로, 공개 신뢰 건너뛰기 플래그가 생기면 제거한다.
+// 문구·화면 형식 변경이나 수락 실패는 기존 agent_blocked로 돌아가며, 포함된 화면으로 진단한다.
+async function acceptClaudeTrust(
+  request: HerdrPrompt,
+  { name, paneId, deadline, deps }: {
+    name: string;
+    paneId: string;
+    deadline: number;
+    deps: HerdrDeps;
+  },
+): Promise<LiveAgent | undefined> {
+  if (request.invocation.agent !== "claude") return;
+  const cwd = request.snapshot?.cwd ?? request.cwd;
+  try {
+    ensureTime(deadline, deps, request.snapshot?.sessionId);
+    const screen = await deps.exec(deps.env.HERDR_BIN_PATH ?? "herdr", [
+      "pane",
+      "read",
+      paneId,
+      "--source",
+      "visible",
+    ], { cwd, env: deps.env, signal: executionSignal(deps) });
+    ensureTime(deadline, deps, request.snapshot?.sessionId);
+    if (screen.code !== 0) return;
+    const keys = claudeTrustKeys(screen.stdout);
+    if (keys == null) return;
+    await json(cwd, deps, ["agent", "send-keys", name, ...keys]);
+    ensureTime(deadline, deps, request.snapshot?.sessionId);
+    const started = agentFromResult(
+      await json(cwd, deps, [
+        "agent",
+        "wait",
+        name,
+        "--until",
+        "idle",
+        "--timeout",
+        activityGateTimeout(deadline, deps),
+      ]),
+      name,
+    );
+    ensureTime(deadline, deps, request.snapshot?.sessionId);
+    if (started.status === "idle") return started;
+  } catch {
+    // 호출자 중단·전체 기한은 재전파하고, 허더 호출 실패는 시작 차단으로 남긴다.
+    ensureTime(deadline, deps, request.snapshot?.sessionId);
+  }
 }
 
 async function waitForNativeSession(
@@ -1795,6 +1852,15 @@ function ensureTime(
       sessionId,
     );
   }
+}
+
+function activityGateTimeout(deadline: number, deps: HerdrDeps): string {
+  return String(
+    Math.max(
+      1,
+      Math.floor(Math.min(activityGateMs, remaining(deadline, deps))),
+    ),
+  );
 }
 
 function remaining(deadline: number, deps: HerdrDeps): number {
