@@ -6,23 +6,21 @@ allowed-tools: Bash(herdr *) Bash(deno run *)
 
 # 세션 선택
 
-- 현재와 다른 모델 우선: `--agent other`
-  - 호출 불가·같은 모델 요청 시 `--agent same`
-  - 두 모델 모두 호출 불가 시 서브에이전트
+- `--agent`: 에이전트 종류 지정, 생략 가능
+  - `other`: 다른 에이전트
+  - `same`: 같은 에이전트
+  - `claude`, `codex`: 특정
+  - `auto`: 생략과 동일, 아무 가용한 것
+- 두 에이전트 모두 호출 불가 시 서브에이전트 허용
 - 모델 지정 시 `--model` 반복, 선택된 agent에 유효한 첫 모델 사용
-  - `same`은 호출자 모델을 알 수 없어 같은 agent의 기본 모델
-- 작업 성격으로 고를 때 `--agent` 명시
-  - `auto`의 키워드 추정은 모델 선택 규칙 미반영
-  - codex: 계획·검토·디버깅·원인 분석
-  - claude: 프론트엔드 구현·조율·넓은 맥락 조사
-- 이전 호출과 조금이라도 관련 있으면 기존 세션에 후속 요청
-- 중첩 실행은 작업 디렉터리의 `AGENTS.md`·`CLAUDE.md` 맥락 공유
+- 이전 호출과 관련 있으면 후속 요청 고려
 
 # 위임 내용
 
 - 역할·배경·확인한 사실·작업·종료 조건 전달
   - 선행 조사는 위임, 호출자만 접근 가능한 정보·실행 결과 포함
 - 종속 세션의 재위임 금지 명시
+- 작업 디렉터리의 `AGENTS.md`·`CLAUDE.md` 맥락 기본 공유
 - 기본 쓰기 허용, 읽기 전용 필요 시 `--permission read-only`
 - 프롬프트는 실행 시 heredoc 표준 입력 또는 `--prompt-file`로 전달
   - 실제 개행 사용, 실행 후 표준 입력 전달 금지
@@ -52,7 +50,7 @@ deno run -A {SKILL_BASE_DIR}/src/delegate.ts prompt --help
 
 # 새 동기 작업
 deno run -A {SKILL_BASE_DIR}/src/delegate.ts prompt \
-  --agent codex <<'PROMPT'
+  --agent other <<'PROMPT'
 <역할, 맥락, 작업, 종료 조건>
 PROMPT
 
