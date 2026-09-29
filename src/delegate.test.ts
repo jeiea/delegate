@@ -1825,6 +1825,7 @@ Deno.test("코덱스 훅 승인 때문에 요청이 진행되지 않으면 패�
   assertStringIncludes(result.stdout, "code: session_id_unavailable");
   assertStringIncludes(result.stdout, "pane_id: pane-delegate");
   assertStringIncludes(result.stdout, "Hooks need review");
+  assertStringIncludes(result.stdout, "herdr integration install codex");
   assertEquals(
     test.fake.calls.some((call) => call.args[1] === "close"),
     false,

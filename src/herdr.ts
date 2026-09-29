@@ -1099,7 +1099,7 @@ async function waitForNativeSession(
   if (candidateSessionId == null) {
     throw new RetainPaneError(
       "session_id_unavailable",
-      "Herdr가 native session ID를 보고하지 않았습니다",
+      "Herdr가 native session ID를 보고하지 않았습니다. 코덱스 훅이 미설치·구버전일 수 있으니 herdr integration status로 확인하고, 해당하면 herdr integration install codex 실행. 새로 설치했다면 새 코덱스 화면의 훅 신뢰 확인을 해소. 보존된 pane은 요청을 재제출하지 말고 화면부터 확인",
     );
   }
   throw new RetainPaneError(

@@ -208,7 +208,7 @@ live_option_conflict: 실행 중 session에 --permission·--model·--effort·--a
 
 live_session_ambiguous: 같은 session의 다른 재개 진행 중. 완료 뒤 재시도
 
-session_id_unavailable: Herdr가 native session ID를 보고하지 않음. prompt가 전달됐을 수 있으므로 pane을 보존하고 확인된 error.pane.pane_id와 마크다운 본문의 현재 화면을 반환. 재제출 전에 pane을 확인. Codex라면 Herdr 훅 설치·신뢰 상태 확인
+session_id_unavailable: Herdr가 native session ID를 보고하지 않음. prompt가 전달됐을 수 있으므로 pane을 보존하고 확인된 error.pane.pane_id와 마크다운 본문의 현재 화면을 반환. 재제출 전에 pane을 확인. Codex라면 오류 메시지대로 Herdr 훅 미설치·구버전·신뢰 상태 확인
 
 timeout: --timeout 초과. 확인된 session ID가 있으면 status 확인. 전달 확인 gate timeout 뒤라면 caller ID 라벨의 pane을 직접 확인·정리
 

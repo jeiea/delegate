@@ -41,10 +41,6 @@ allowed-tools: Bash(herdr *) Bash(deno run *)
 - 클로드의 `session_id`는 시작 전에 발급된 UUID일 수 있어 네이티브 기록 파일의
   존재를 뜻하지 않음. 차단 해소 뒤에도 파일이 없으면 보존 pane을 확인하고 필요
   시 명시적으로 정리
-- 코덱스의 허더 위임이 `session_id_unavailable`이면
-  `herdr integration status`에서 코덱스 훅을 확인. 미설치면
-  `herdr integration install codex` 후 새 코덱스 화면의 훅 신뢰 확인을 해소.
-  보존된 pane의 요청을 다시 제출하지 말고 화면부터 확인
 - Herdr의 `prompt`·`wait` 성공 시 옮긴 터미널 분할 창도 자동 정리
   - 같은 ID로 대화 재개 가능
   - `close`는 Herdr 창의 중단·자동 정리 실패 시 사용
