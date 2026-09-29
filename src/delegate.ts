@@ -29,6 +29,7 @@ import { publicEvents } from "./activity.ts";
 import {
   type DelegateDocument,
   DelegateError,
+  type DelegateWarning,
   exitCode,
   type NativeSessionId,
   normalizeError,
@@ -51,11 +52,14 @@ import {
 import { denoExec, type Exec } from "./process.ts";
 import {
   type Agent,
+  type AgentOption,
   type Effort,
   type NativeInvocation,
   parseDuration,
   type Permission,
+  requestedAgent,
   selectAgent,
+  selectModel,
   selectTransport,
 } from "./select.ts";
 
@@ -74,10 +78,10 @@ type PromptOptions = {
   kind: "prompt";
   target?: string;
   promptFile?: string;
-  agent: "auto" | Agent;
+  agent: AgentOption;
   transport: "auto" | "herdr" | "direct";
   permission?: Permission;
-  model?: string;
+  models: readonly string[];
   effort?: Effort;
   addDirs: readonly string[];
   callerId?: string;
@@ -139,10 +143,14 @@ function parser() {
           { description: message`prompt 본문 파일. 생략 시 stdin` },
         )),
         agent: withDefault(
-          option("--agent", choice(["auto", "codex", "claude"] as const), {
-            description:
-              message`auto는 prompt 키워드로 추정. 기존 session은 감지된 agent 사용`,
-          }),
+          option(
+            "--agent",
+            choice(["auto", "same", "other", "codex", "claude"] as const),
+            {
+              description:
+                message`same·other는 호출자 기준이며 CODEX_THREAD_ID가 있으면 codex, 아니면 CLAUDECODE=1이면 claude. 호출자 모델은 알 수 없어 same은 같은 agent의 기본 모델. auto는 소속이 판정되는 첫 --model의 agent, 없으면 prompt 키워드로 추정. 기존 session은 감지된 agent를 사용하고 다르면 resume_option_ignored 경고`,
+            },
+          ),
           "auto" as const,
         ),
         transport: withDefault(
@@ -156,8 +164,9 @@ function parser() {
           choice(["read-only", "write"] as const),
           { description: message`기본 write. 실행 중 session은 변경 불가` },
         )),
-        model: optional(option("--model", string({ metavar: "MODEL" }), {
-          description: message`native agent 모델. 실행 중 session은 변경 불가`,
+        models: multiple(option("--model", string({ metavar: "MODEL" }), {
+          description:
+            message`native agent 모델. 반복 지정 순서대로 선택된 agent에 유효한 첫 모델 사용, 없으면 생략. gpt-·o숫자·codex-는 codex, claude-·opus·sonnet·haiku·fable은 claude 전용이며 그 외 이름은 그대로 전달. 실행 중 session은 무시하고 resume_option_ignored 경고`,
         })),
         effort: optional(option(
           "--effort",
@@ -204,7 +213,7 @@ agent_blocked: 사용자 입력 대기. 확인된 error.pane.pane_id와 마크�
 
 invalid_native_session: pane이 확인되면 error.pane.pane_id와 현재 화면을 반환. 차단 해소 뒤에도 native 기록 파일이 없을 수 있으므로 pane을 확인하고 필요 시 정리
 
-live_option_conflict: 실행 중 session에 --permission·--model·--effort·--add-dir 지정
+live_option_conflict: 실행 중 session에 --permission·--effort·--add-dir 지정
 
 live_session_ambiguous: 같은 session의 다른 재개 진행 중. 완료 뒤 재시도
 
@@ -214,7 +223,9 @@ timeout: --timeout 초과. 확인된 session ID가 있으면 status 확인. 전�
 
 warnings[].code 대응 (마크다운 본문은 유효)
 
-cleanup_failed: 정리만 실패. 필요 시 close`,
+cleanup_failed: 정리만 실패. 필요 시 close
+
+resume_option_ignored: 기존 session에 적용할 수 없는 --agent(agent)·실행 중 session의 --model(model)을 무시. 실제 값은 agent·model 필드 확인`,
       },
     ),
     (value) => ({
@@ -344,7 +355,7 @@ export async function runDelegate(
       programName: "delegate",
       brief: message`Codex·Claude native session 위임`,
       description:
-        message`--skill은 현재 CLI 주소를 사용한 SKILL.md를 출력. 나머지 명령의 출력은 YAML 프런트매터와 선택적 마크다운 본문. session_id, agent, activity, observation, intervening_prompts, error, warnings, retry는 프런트매터, result는 본문. observation은 logs와 Herdr 창 없는 status·wait의 원본 기록 관찰. intervening_prompts는 추가 사람 프롬프트가 있을 때만 반환`,
+        message`--skill은 현재 CLI 주소를 사용한 SKILL.md를 출력. 나머지 명령의 출력은 YAML 프런트매터와 선택적 마크다운 본문. session_id, agent, model, activity, observation, intervening_prompts, error, warnings, retry는 프런트매터, result는 본문. model은 prompt가 native agent에 모델을 전달한 경우만 반환. observation은 logs와 Herdr 창 없는 status·wait의 원본 기록 관찰. intervening_prompts는 추가 사람 프롬프트가 있을 때만 반환`,
       footer:
         message`exit code: 2 usage, 3 환경·session 없음, 4 사용자 조치 필요, 5 실패, 6 timeout, 130 중단`,
       args,
@@ -433,14 +444,23 @@ export async function runDelegate(
     const snapshot = parsed.target == null
       ? undefined
       : await findNativeSession(parsed.target, deps.env);
-    const agent = selectPromptAgent(parsed.agent, prompt, snapshot?.agent);
+    const requested = requestedAgent(parsed.agent, parsed.models, deps.env);
+    const agent = snapshot?.agent ?? requested ?? selectAgent(prompt).agent;
+    const warnings: DelegateWarning[] = requested == null || requested === agent
+      ? []
+      : [{
+        code: "resume_option_ignored",
+        message: `감지된 agent=${agent}로 재개해 요청한 agent를 무시했습니다`,
+        agent: requested,
+      }];
+    const model = selectModel(agent, parsed.models);
     const request = {
       permission: parsed.permission ?? "write",
       cwd: snapshot?.cwd ?? deps.cwd,
       addDirs: parsed.addDirs.map((dir) => resolve(deps.cwd, dir)),
       effort: parsed.effort,
       prompt,
-      model: parsed.model,
+      model,
       callerId: parsed.callerId ?? deps.env.CODEX_THREAD_ID,
       name: parsed.name,
       resumeSessionId: snapshot?.sessionId,
@@ -449,8 +469,8 @@ export async function runDelegate(
       ? planCodex(request)
       : planClaude(request);
     const startOptionsSpecified = snapshot != null && (
-      parsed.permission != null || parsed.model != null ||
-      parsed.effort != null || parsed.addDirs.length > 0
+      parsed.permission != null || parsed.effort != null ||
+      parsed.addDirs.length > 0
     );
     if (transport === "direct") {
       return await executeDirect(
@@ -459,6 +479,7 @@ export async function runDelegate(
         request.cwd,
         deps,
         parsed.timeoutMs,
+        { model, warnings },
       );
     }
     return success(
@@ -470,6 +491,8 @@ export async function runDelegate(
         name: parsed.name,
         timeoutMs: parsed.timeoutMs,
         startOptionsSpecified,
+        model,
+        warnings,
       }, herdrDeps),
     );
   } catch (error) {
@@ -535,6 +558,7 @@ async function executeDirect(
   cwd: string,
   deps: Deps,
   timeoutMs: number,
+  started: { model?: string; warnings: DelegateWarning[] },
 ) {
   let handle;
   let output;
@@ -642,7 +666,9 @@ async function executeDirect(
   return success({
     session_id: parsed.sessionId,
     agent: invocation.agent,
+    ...(started.model == null ? {} : { model: started.model }),
     activity: "quiescent",
+    ...(started.warnings.length === 0 ? {} : { warnings: started.warnings }),
     result: parsed.result,
   });
 }
@@ -658,23 +684,6 @@ async function readPrompt(promptFile: string | undefined, deps: Deps) {
     prompt = await deps.stdin.text();
   }
   return prompt.replace(/^\uFEFF/, "").replace(/\r?\n$/, "");
-}
-
-function selectPromptAgent(
-  requested: "auto" | Agent,
-  prompt: string,
-  detected?: Agent,
-): Agent {
-  if (detected != null) {
-    if (requested !== "auto" && requested !== detected) {
-      throw new DelegateError(
-        "usage",
-        `감지된 agent=${detected}와 --agent=${requested}가 다릅니다`,
-      );
-    }
-    return detected;
-  }
-  return requested === "auto" ? selectAgent(prompt).agent : requested;
 }
 
 function runtimeDeps(deps: Deps): HerdrDeps {

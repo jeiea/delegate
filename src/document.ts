@@ -50,6 +50,7 @@ export type RetryRecord = {
 export type DelegateDocument = {
   session_id?: NativeSessionId;
   agent?: "codex" | "claude";
+  model?: string;
   activity?: PublicActivity;
   observation?: NativeObservation;
   intervening_prompts?: string[];
@@ -59,12 +60,19 @@ export type DelegateDocument = {
     message: string;
     pane?: { pane_id: string };
   };
-  warnings?: Array<{
-    code: "cleanup_failed";
-    message: string;
-  }>;
+  warnings?: DelegateWarning[];
   retry?: RetryRecord;
   screen?: string;
+};
+
+export type DelegateWarning = {
+  code: "cleanup_failed";
+  message: string;
+} | {
+  code: "resume_option_ignored";
+  message: string;
+  agent?: "codex" | "claude";
+  model?: string;
 };
 
 export class DelegateError extends Error {

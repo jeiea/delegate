@@ -2,6 +2,7 @@ import { isAbsolute } from "jsr:@std/path@1.1.6";
 import { closeDirect, statusDirect, waitDirect } from "./direct.ts";
 import type {
   DelegateDocument,
+  DelegateWarning,
   PublicActivity,
   RetryRecord,
 } from "./document.ts";
@@ -46,6 +47,8 @@ export type HerdrPrompt = {
   name?: string;
   timeoutMs: number;
   startOptionsSpecified: boolean;
+  model?: string;
+  warnings: readonly DelegateWarning[];
 };
 
 type HerdrResult = Record<string, unknown>;
@@ -71,8 +74,6 @@ type ManagedPane = LiveAgent & {
 };
 
 type OwnedPaneId = string | undefined;
-
-type CleanupWarning = NonNullable<DelegateDocument["warnings"]>[number];
 
 class RetainPaneError extends DelegateError {}
 class LiveAgentListError extends DelegateError {}
@@ -114,6 +115,14 @@ export async function promptHerdr(
       "live session에는 시작 전용 옵션을 적용할 수 없습니다",
     );
   }
+  const ignoredModel: DelegateWarning[] = live == null || request.model == null
+    ? []
+    : [{
+      code: "resume_option_ignored",
+      message: "live session에는 --model을 적용할 수 없어 무시했습니다",
+      model: request.model,
+    }];
+  const model = live == null ? request.model : undefined;
   const callerId = await withSessionError(
     resolveCallerId(
       request.callerId,
@@ -311,7 +320,8 @@ export async function promptHerdr(
           offset,
           excludeInitialTurn: true,
         }),
-        warnings,
+        model,
+        warnings: [...request.warnings, ...ignoredModel, ...warnings ?? []],
         retry,
       },
     );
@@ -1508,7 +1518,7 @@ async function cleanupAutomatically(
   snapshot: SharedSession,
   deadline: number,
   deps: HerdrDeps,
-): Promise<CleanupWarning[] | undefined> {
+): Promise<DelegateWarning[] | undefined> {
   if (live.paneId == null) {
     return [{
       code: "cleanup_failed",
@@ -1739,13 +1749,15 @@ function document(
   activity: PublicActivity,
   options: {
     outcome?: PromptOutcome;
-    warnings?: CleanupWarning[];
+    model?: string;
+    warnings?: DelegateWarning[];
     retry?: RetryRecord;
   } = {},
 ): DelegateDocument {
   return {
     session_id: snapshot.sessionId,
     agent: snapshot.agent,
+    ...(options.model == null ? {} : { model: options.model }),
     activity,
     ...options.outcome,
     ...(options.warnings == null || options.warnings.length === 0

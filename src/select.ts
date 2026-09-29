@@ -1,4 +1,7 @@
+import { DelegateError } from "./document.ts";
+
 export type Agent = "codex" | "claude";
+export type AgentOption = "auto" | "same" | "other" | Agent;
 export type Permission = "read-only" | "write";
 export type Transport = "direct" | "herdr";
 export type Effort = "low" | "medium" | "high" | "xhigh" | "max";
@@ -47,6 +50,50 @@ export function selectAgent(
     return { agent: "claude", reason: "task-kind=coordination" };
   }
   return { agent: "codex", reason: "task-kind=default" };
+}
+
+/**
+ * 명시·호출자 기준 agent. auto는 첫 소속 판정 모델의 agent이며 없으면 생략해
+ * 재개 시 감지된 agent, 새 시작 시 키워드 추정에 맡긴다.
+ */
+export function requestedAgent(
+  option: AgentOption,
+  models: readonly string[],
+  env: Record<string, string>,
+): Agent | undefined {
+  if (option === "auto") {
+    return models.map(modelOwner).find((owner) => owner != null);
+  }
+  if (option !== "same" && option !== "other") return option;
+  const caller = detectCaller(env);
+  if (caller == null) {
+    throw new DelegateError(
+      "usage",
+      `--agent ${option}의 호출자를 CODEX_THREAD_ID·CLAUDECODE로 확인할 수 없습니다`,
+    );
+  }
+  if (option === "same") return caller;
+  return caller === "codex" ? "claude" : "codex";
+}
+
+export function selectModel(
+  agent: Agent,
+  models: readonly string[],
+): string | undefined {
+  return models.find((model) => (modelOwner(model) ?? agent) === agent);
+}
+
+// Herdr 중첩 시 클로드 환경 변수가 자식 코덱스에 상속될 수 있어 코덱스를 먼저 본다.
+function detectCaller(env: Record<string, string>): Agent | undefined {
+  if ((env.CODEX_THREAD_ID ?? "") !== "") return "codex";
+  if (env.CLAUDECODE === "1") return "claude";
+  return undefined;
+}
+
+function modelOwner(model: string): Agent | undefined {
+  if (/^(gpt-|o\d|codex-)/iu.test(model)) return "codex";
+  if (/^(claude-|opus|sonnet|haiku|fable)/iu.test(model)) return "claude";
+  return undefined;
 }
 
 export function parseDuration(input: string): number {

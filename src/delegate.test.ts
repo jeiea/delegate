@@ -553,25 +553,26 @@ Deno.test("종료된 코덱스 작업을 재개하면 같은 세션에서 결과
   assertEquals(replaced.stdout.includes("intervening_prompts:"), false);
 });
 
-Deno.test("실행 중인 작업의 시작 옵션을 바꾸면 거부하고 옵션 없이 다시 요청하면 작업을 마친다", async () => {
+Deno.test("실행 중인 작업의 권한·추론 강도를 바꾸면 거부하고 모델만 바꾸면 경고와 함께 기존 모델로 작업을 마친다", async () => {
   await using dir = await createTempDir({ prefix: "delegate-test-" });
   writeJsonl(codexPath(dir.path), [codexMeta(), ...codexTurn("old", "old")]);
-  const live = setup(dir.path, "후속", [
-    herdr({ agents: [liveAgent("idle", 1)] }),
-  ], {
-    env: { HERDR_ENV: "1" },
-  });
-  const conflict = await runDelegate([
-    "prompt",
-    codexId,
-    "--effort",
-    "medium",
-    "--caller-id",
-    "caller",
-  ], live.deps);
-  assertEquals(conflict.code, 2);
-  assertStringIncludes(conflict.stdout, "code: live_option_conflict");
-  assertEquals(live.fake.calls.length, 1);
+  for (const option of [["--effort", "medium"], ["--permission", "write"]]) {
+    const live = setup(dir.path, "후속", [
+      herdr({ agents: [liveAgent("idle", 1)] }),
+    ], {
+      env: { HERDR_ENV: "1" },
+    });
+    const conflict = await runDelegate([
+      "prompt",
+      codexId,
+      ...option,
+      "--caller-id",
+      "caller",
+    ], live.deps);
+    assertEquals(conflict.code, 2, option[0]);
+    assertStringIncludes(conflict.stdout, "code: live_option_conflict");
+    assertEquals(live.fake.calls.length, 1);
+  }
 
   let now = 0;
   const idle = setup(dir.path, "후속", [
@@ -599,11 +600,19 @@ Deno.test("실행 중인 작업의 시작 옵션을 바꾸면 거부하고 옵�
     codexId,
     "--caller-id",
     "caller",
+    "--model",
+    "gpt-6-astra",
     "--timeout",
     "1s",
   ], idle.deps);
   assertEquals(resumed.code, 0);
   assertStringIncludes(resumed.stdout, "후속 완료");
+  assertStringIncludes(
+    resumed.stdout,
+    "warnings:\n  - code: resume_option_ignored\n",
+  );
+  assertStringIncludes(resumed.stdout, "    model: gpt-6-astra\n");
+  assertEquals(resumed.stdout.includes("\nmodel:"), false);
   const idlePrompt = idle.fake.calls.find((call) => call.args[1] === "prompt");
   assertEquals(idlePrompt?.args.includes("--wait"), true);
   assertEquals(idlePrompt?.args.includes("working"), true);
@@ -3277,6 +3286,108 @@ Deno.test("클로드와 코덱스에 직접 요청하면 공개 진행 상황과
   }
 });
 
+Deno.test("호출자와 같은·다른 에이전트나 모델 소속으로 대상을 고르고 그 에이전트에 맞는 첫 모델만 넘긴다", async () => {
+  await using dir = await createTempDir({ prefix: "delegate-test-" });
+  const cases = [
+    {
+      env: { CODEX_THREAD_ID: "thread", CLAUDECODE: "1" },
+      args: ["--agent", "same", "--model", "opus", "--model", "gpt-6-astra"],
+      agent: "codex",
+      model: "gpt-6-astra",
+    },
+    {
+      env: { CLAUDECODE: "1" },
+      args: ["--agent", "same", "--model", "gpt-6-astra", "--model", "foo-1"],
+      agent: "claude",
+      model: "foo-1",
+    },
+    {
+      env: { CLAUDECODE: "1" },
+      args: ["--agent", "other", "--model", "sonnet", "--model", "o4-mini"],
+      agent: "codex",
+      model: "o4-mini",
+    },
+    {
+      env: { CODEX_THREAD_ID: "thread" },
+      args: ["--agent", "other", "--model", "codex-mini"],
+      agent: "claude",
+      model: undefined,
+    },
+    {
+      env: {},
+      args: ["--model", "foo-1", "--model", "gpt-6-astra"],
+      agent: "codex",
+      model: "foo-1",
+    },
+    { env: {}, args: ["--model", "foo-1"], agent: "claude", model: "foo-1" },
+  ] as const;
+  for (const { env, args, agent, model } of cases) {
+    const test = setup(dir.path, "프론트엔드 구현", [directReply(agent)], {
+      env,
+    });
+    const result = await runDelegate(
+      ["prompt", "--transport", "direct", ...args],
+      test.deps,
+    );
+    const label = args.join(" ");
+    assertEquals(result.code, 0, label);
+    assertEquals(test.fake.calls[0]?.cmd, agent, label);
+    assertEquals(passedModel(test.fake.calls[0]?.args ?? []), model, label);
+    assertEquals(
+      result.stdout.includes(`\nmodel: ${model}\n`),
+      model != null,
+      label,
+    );
+    assertEquals(result.stdout.includes("\nmodel:"), model != null, label);
+  }
+
+  const unknown = setup(dir.path, "작업", [], {
+    env: { CODEX_THREAD_ID: "", CLAUDECODE: "0" },
+  });
+  const rejected = await runDelegate(
+    ["prompt", "--transport", "direct", "--agent", "same"],
+    unknown.deps,
+  );
+  assertEquals(rejected.code, 2);
+  assertStringIncludes(rejected.stdout, "code: usage");
+  assertEquals(unknown.fake.calls, []);
+});
+
+Deno.test("종료된 세션을 다른 에이전트로 재개하도록 요청하면 경고 후 감지된 에이전트와 맞는 모델로 재개한다", async () => {
+  await using dir = await createTempDir({ prefix: "delegate-test-" });
+  writeJsonl(codexPath(dir.path), [codexMeta(), ...codexTurn("old", "old")]);
+  const mismatch = setup(dir.path, "후속", [directReply("codex")]);
+  const resumed = await runDelegate([
+    "prompt",
+    codexId,
+    "--transport",
+    "direct",
+    "--agent",
+    "claude",
+    "--model",
+    "opus",
+    "--model",
+    "gpt-6-astra",
+  ], mismatch.deps);
+  assertEquals(resumed.code, 0);
+  assertEquals(mismatch.fake.calls[0]?.cmd, "codex");
+  assertEquals(passedModel(mismatch.fake.calls[0]?.args ?? []), "gpt-6-astra");
+  assertStringIncludes(resumed.stdout, "\nmodel: gpt-6-astra\n");
+  assertStringIncludes(
+    resumed.stdout,
+    "warnings:\n  - code: resume_option_ignored\n",
+  );
+  assertStringIncludes(resumed.stdout, "    agent: claude\n");
+
+  const guessed = setup(dir.path, "프론트엔드 구현", [directReply("codex")]);
+  const auto = await runDelegate(
+    ["prompt", codexId, "--transport", "direct"],
+    guessed.deps,
+  );
+  assertEquals(auto.code, 0);
+  assertEquals(auto.stdout.includes("warnings:"), false);
+});
+
 Deno.test("직접 실행이 시작되지 않거나 제한 시간 초과·취소로 끝나면 실패 원인과 확인된 세션을 알린다", async () => {
   await using dir = await createTempDir({ prefix: "delegate-test-" });
   const failed = setup(dir.path, "작업", [{
@@ -4410,6 +4521,31 @@ function codexTurn(
       }]
       : []),
   ];
+}
+
+function directReply(agent: "codex" | "claude"): FakeResponse {
+  return {
+    cmd: agent,
+    stdout: agent === "codex"
+      ? line({ type: "thread.started", thread_id: codexId }) + line({
+        type: "item.completed",
+        item: { type: "agent_message", text: "완료" },
+      })
+      : line({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        session_id: claudeId,
+        result: "완료",
+      }),
+  };
+}
+
+function passedModel(args: readonly string[]): string | undefined {
+  const index = args.indexOf("-m");
+  return index >= 0
+    ? args[index + 1]
+    : args.find((arg) => arg.startsWith("--model="))?.slice("--model=".length);
 }
 
 function writeJsonl(path: string, records: readonly unknown[], partial = "") {
