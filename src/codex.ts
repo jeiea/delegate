@@ -44,7 +44,10 @@ export function planCodex(request: PlanRequest): NativeInvocation {
     ...permission,
     "-C",
     request.cwd,
-    ...request.addDirs.flatMap((dir) => ["--add-dir", dir]),
+    // 읽기 전용 프로필은 전체 디스크를 읽고, 쓰기 루트 추가는 거부해 시작에 실패함
+    ...(request.permission === "read-only"
+      ? []
+      : request.addDirs.flatMap((dir) => ["--add-dir", dir])),
     ...(request.model == null ? [] : ["-m", request.model]),
     ...(request.effort == null
       ? []

@@ -73,3 +73,22 @@ Deno.test("읽기 전용 Codex는 파일 쓰기만 막고 네트워크 조회는
     }
   }
 });
+
+Deno.test("추가 디렉터리를 지정해도 읽기 전용 Codex는 시작하고 쓰기 Codex는 그 디렉터리에 쓸 수 있다", () => {
+  for (const permission of ["read-only", "write"] as const) {
+    const plan = planCodex({
+      cwd: "/workspace",
+      addDirs: ["/extra"],
+      prompt: "조사",
+      permission,
+    });
+
+    for (const args of [plan.directArgs, plan.herdrArgs]) {
+      assertEquals(
+        countPair(args, ["--add-dir", "/extra"]),
+        permission === "read-only" ? 0 : 1,
+        permission,
+      );
+    }
+  }
+});

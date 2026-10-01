@@ -181,7 +181,7 @@ function parser() {
           path({ type: "directory", mustExist: true }),
           {
             description:
-              message`추가 접근 디렉터리. 실행 중 session은 변경 불가`,
+              message`추가 접근 디렉터리. 코덱스 read-only는 전체를 읽어 생략. 실행 중 session은 변경 불가`,
           },
         )),
         callerId: optional(option("--caller-id", string({ metavar: "ID" }), {
