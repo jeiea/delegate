@@ -11,8 +11,7 @@ export function planClaude(request: PlanRequest): NativeInvocation {
     .join(" ");
   const permission = request.permission === "read-only"
     ? [
-      "--permission-mode=dontAsk",
-      "--permission-prompts=none",
+      "--permission-mode=auto",
       "--tools=Bash,Read,Glob,Grep,WebSearch,WebFetch",
       "--allowedTools=WebSearch,WebFetch(domain:*)",
       "--strict-mcp-config",
