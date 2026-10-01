@@ -1214,8 +1214,17 @@ Deno.test("기존 패널에서 작업을 시작할 수 없거나 재시도할 �
   }
 });
 
-Deno.test("에이전트 시작에 사용자 입력이 필요하면 요청을 보류하고 화면과 대응 위치를 알린다", async () => {
-  for (const resume of [false, true]) {
+Deno.test("에이전트가 사용자 입력을 기다리거나 시작 직후 종료돼 준비되지 않으면 요청을 보류하고 화면과 대응 위치를 알린다", async () => {
+  for (
+    const [resume, failure] of [
+      [false, "agent_not_ready"],
+      [true, "agent_not_ready"],
+      // 코덱스가 시작 오류를 출력하고 셸로 돌아가면 Herdr는 감지 시점에 따라 시작 실패나 대기 시간 초과를 알린다.
+      [false, "timeout"],
+      [true, "timeout"],
+      [false, "agent_start_failed"],
+    ] as const
+  ) {
     await using dir = await createTempDir({ prefix: "delegate-test-" });
     if (resume) {
       writeJsonl(codexPath(dir.path), [
@@ -1223,19 +1232,29 @@ Deno.test("에이전트 시작에 사용자 입력이 필요하면 요청을 보
         ...codexTurn("old", "이전", "완료"),
       ]);
     }
-    const reason = "interactive startup screen requires input";
+    const reason = {
+      agent_not_ready: "interactive startup screen requires input",
+      agent_start_failed: "agent process exited before becoming interactive",
+      timeout: "timed out waiting for agent startup",
+    }[failure];
     const test = setup(dir.path, "작업", [
       ...(resume ? [herdr({ agents: [] }), herdr({ agents: [] })] : []),
       ...newTabAllocation(),
-      herdrError("agent_not_ready", reason),
-      herdr({
-        agent: {
-          pane_id: "pane-delegate",
-          agent_kind: "codex",
-          cwd,
-          agent_status: "blocked",
-        },
-      }),
+      herdrError(failure, reason),
+      ...(failure !== "agent_not_ready"
+        ? [
+          // Herdr는 시작 실패 뒤 에이전트 등록을 해제하고 셸 pane만 남긴다.
+          herdrError("agent_not_found", "agent target not found"),
+          herdr({ pane: { pane_id: "pane-delegate", cwd } }),
+        ]
+        : [herdr({
+          agent: {
+            pane_id: "pane-delegate",
+            agent_kind: "codex",
+            cwd,
+            agent_status: "blocked",
+          },
+        })]),
       { cmd: "herdr", stdout: "Trust this folder?\n``` suspicious\n" },
     ], { env: { HERDR_ENV: "1" } });
 

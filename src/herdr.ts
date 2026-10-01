@@ -413,9 +413,11 @@ async function diagnosePane(
         () => json(target.cwd, deps, ["pane", "get", target.paneId], signal),
       );
       const pane = objectValue(result.pane);
+      const agent = stringValue(pane.agent) ?? stringValue(pane.agent_name);
+      // 이번 호출이 할당한 pane에서 에이전트가 시작 직후 종료되면 Herdr가 등록을 해제해 셸만 남는다.
       confirmed = stringValue(pane.pane_id) === target.paneId &&
-        (stringValue(pane.agent) ?? stringValue(pane.agent_name)) ===
-          target.name;
+        (agent === target.name ||
+          (target.strictPane === true && agent == null));
     }
     if (!confirmed) return error;
     let screen: string | undefined;
@@ -1698,7 +1700,8 @@ async function json(
   if (interruption != null) throw interruption;
   if (output.code !== 0) {
     const parsed = parseCommandError(output.stderr);
-    if (parsed.code === "timeout") {
+    const starting = args[0] === "agent" && args[1] === "start";
+    if (parsed.code === "timeout" && !starting) {
       throw new DelegateError("timeout", parsed.message);
     }
     if (
@@ -1708,10 +1711,12 @@ async function json(
       // Herdr는 입력을 전송한 뒤에도 작업 상태를 관측하지 못할 수 있다.
       throw new RetainPaneError("herdr_failed", parsed.message);
     }
+    // 시작 직후 종료는 감지 시점에 따라 시작 실패나 전체 기한 안의 대기 시간 초과로 보고되며, 화면으로 원인을 확인한다.
     if (
       parsed.code === "agent_blocked" ||
-      (parsed.code === "agent_not_ready" && args[0] === "agent" &&
-        args[1] === "start")
+      (["agent_not_ready", "agent_start_failed", "timeout"].includes(
+        parsed.code,
+      ) && starting)
     ) {
       throw new DelegateError("agent_blocked", parsed.message);
     }
