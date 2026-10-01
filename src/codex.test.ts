@@ -51,3 +51,25 @@ function countPair(args: readonly string[], pair: readonly string[]): number {
     0,
   );
 }
+
+Deno.test("읽기 전용 Codex는 파일 쓰기만 막고 네트워크 조회는 승인 없이 허용한다", () => {
+  const plan = planCodex({
+    cwd: "/workspace",
+    addDirs: [],
+    prompt: "조사",
+    permission: "read-only",
+  });
+
+  for (const args of [plan.directArgs, plan.herdrArgs]) {
+    assertEquals(args.includes("-s"), false);
+    for (
+      const value of [
+        'default_permissions="delegate-read-only"',
+        'permissions.delegate-read-only.extends=":read-only"',
+        "permissions.delegate-read-only.network.enabled=true",
+      ]
+    ) {
+      assertEquals(countPair(args, ["-c", value]), 1, value);
+    }
+  }
+});
