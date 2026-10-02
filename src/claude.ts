@@ -99,12 +99,17 @@ export function parseClaudeSession(
     }
     sessionId ??= stringValue(event.sessionId) ?? stringValue(event.session_id);
     cwd ??= stringValue(event.cwd);
-    if (isHumanPrompt(event)) {
-      active = {
-        prompt: messageText(asObject(event.message).content),
-        start: record.start,
-        groups: new Map(),
-      };
+    const prompt = humanPrompt(event);
+    if (prompt != null) {
+      if (active != null) {
+        turns.push({
+          prompt: active.prompt,
+          completed: false,
+          start: active.start,
+          end: record.start,
+        });
+      }
+      active = { prompt, start: record.start, groups: new Map() };
       continue;
     }
     if (
@@ -159,19 +164,32 @@ export function parseClaudeSession(
   return { sessionId, cwd, turns };
 }
 
-function isHumanPrompt(event: Record<string, unknown>): boolean {
-  if (event.type !== "user") return false;
-  const origin = asObject(event.origin);
-  if (origin.kind != null || event.promptSource != null) {
-    return origin.kind === "human" && event.promptSource === "typed";
+// 작업 중 받은 프롬프트는 진행 중인 턴에 합쳐지면 queued_command 첨부로,
+// 턴이 끝난 뒤 실행되면 promptSource "queued"인 user 기록으로 남는다.
+function humanPrompt(event: Record<string, unknown>): string | undefined {
+  if (event.type === "attachment") {
+    const attachment = asObject(event.attachment);
+    return attachment.type === "queued_command" &&
+        asObject(attachment.origin).kind === "human"
+      ? stringValue(attachment.prompt)
+      : undefined;
   }
-  return (
-    event.isMeta !== true &&
-    event.toolUseResult == null &&
-    event.isSidechain !== true &&
-    (event.userType == null || event.userType === "external") &&
-    typeof asObject(event.message).content === "string"
-  );
+  if (event.type !== "user") return undefined;
+  const origin = asObject(event.origin);
+  const content = asObject(event.message).content;
+  if (origin.kind != null || event.promptSource != null) {
+    return origin.kind === "human" &&
+        (event.promptSource === "typed" || event.promptSource === "queued")
+      ? messageText(content)
+      : undefined;
+  }
+  return event.isMeta !== true &&
+      event.toolUseResult == null &&
+      event.isSidechain !== true &&
+      (event.userType == null || event.userType === "external") &&
+      typeof content === "string"
+    ? content
+    : undefined;
 }
 
 function asObject(value: unknown): Record<string, unknown> {

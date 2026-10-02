@@ -3622,6 +3622,71 @@ Deno.test("클로드 로그에서 사람의 요청과 최종 답변·공개 도�
   assertEquals(logs.stdout.includes("secret"), false);
 });
 
+Deno.test("진행 중인 클로드 작업에 후속 요청을 보내면 진행 중인 턴에 합쳐져도 후속 결과를 받고 첫 요청 기록을 남긴다", async () => {
+  await using dir = await createTempDir({ prefix: "delegate-test-" });
+  const path = claudePath(dir.path);
+  writeJsonl(path, claudeOpen(`${prefix}첫 요청`));
+  let now = 0;
+  let followUpWritten = false;
+  const queued = (kind: string, prompt: string) => ({
+    type: "attachment",
+    sessionId: claudeId,
+    cwd,
+    attachment: {
+      type: "queued_command",
+      commandMode: kind === "human" ? "prompt" : kind,
+      origin: { kind },
+      prompt,
+    },
+  });
+  const test = setup(dir.path, "후속 요청", [
+    herdr({ agents: [claudeLive("working", 1)] }),
+    herdr({ agent: currentClaude("working", 2) }),
+    herdr({ agent: claudeLive("done", 3) }),
+    herdr({ agent: claudeLive("done", 3) }),
+    herdr({}),
+  ], {
+    env: { HERDR_ENV: "1" },
+    now: () => now,
+    sleep: (ms) => {
+      now += ms;
+      if (!followUpWritten && now > 5_000) {
+        appendJsonl(path, [
+          queued("task-notification", "<task-notification>작업 완료"),
+          queued("human", `${prefix}후속 요청`),
+          {
+            type: "assistant",
+            sessionId: claudeId,
+            cwd,
+            requestId: "req-follow-up",
+            message: { content: [{ type: "text", text: "후속 결과" }] },
+          },
+          { type: "system", subtype: "turn_duration", sessionId: claudeId },
+        ]);
+        followUpWritten = true;
+      }
+      return Promise.resolve();
+    },
+  });
+
+  const prompted = await runDelegate([
+    "prompt",
+    claudeId,
+    "--caller-id",
+    "caller-1",
+    "--timeout",
+    "60s",
+  ], test.deps);
+  assertEquals(prompted.code, 0);
+  assertStringIncludes(prompted.stdout, "후속 결과");
+  assertEquals(prompted.stdout.includes("intervening_prompts:"), false);
+
+  const logs = await runDelegate(["logs", claudeId], test.deps);
+  assertStringIncludes(logs.stdout, "첫 요청");
+  assertStringIncludes(logs.stdout, "후속 요청");
+  assertEquals(logs.stdout.includes("task-notification"), false);
+});
+
 // Status
 
 Deno.test("윈도에서 홈과 사용자 프로필이 달라도 기본 프로필에 기록된 세션의 상태를 확인한다", async () => {
@@ -4004,7 +4069,7 @@ Deno.test("창 없는 클로드 세션을 기다리면 새 요청 뒤 추가 요
           message: { content: [{ type: "text", text: "새 답변" }] },
         },
         { type: "system", subtype: "turn_duration" },
-        ...claudeOpen("추가 요청"),
+        { ...claudeOpen("추가 요청")[0], promptSource: "queued" },
         {
           type: "assistant",
           message: {
