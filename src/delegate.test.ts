@@ -3584,6 +3584,182 @@ Deno.test("종료된 세션을 다른 에이전트로 재개하도록 요청하�
   assertEquals(auto.stdout.includes("warnings:"), false);
 });
 
+Deno.test("선택한 CLI가 없으면 설치된 에이전트로 요청을 마치고 대체 사유와 실제 모델을 알린다", async () => {
+  await using dir = await createTempDir({ prefix: "delegate-test-" });
+  for (const agent of ["codex", "claude"] as const) {
+    const preferred = agent === "codex" ? "claude" : "codex";
+    const model = agent === "codex" ? "gpt-6-astra" : "opus";
+    for (const option of [preferred, "same", "other", "auto"]) {
+      const test = setup(dir.path, "작업", [directReply(agent)], {
+        installed: [agent],
+        env: option === "other"
+          ? agent === "codex"
+            ? { CODEX_THREAD_ID: "caller" }
+            : { CLAUDECODE: "1" }
+          : preferred === "codex"
+          ? { CODEX_THREAD_ID: "caller" }
+          : { CLAUDECODE: "1" },
+      });
+      const result = await runDelegate([
+        "prompt",
+        "--agent",
+        option,
+        "--model",
+        preferred === "codex" ? "gpt-6-astra" : "opus",
+        "--model",
+        model,
+      ], test.deps);
+      assertEquals(result.code, 0, result.stdout);
+      assertEquals(test.fake.calls.length, 1);
+      assertEquals(test.fake.calls[0].cmd, agent);
+      assertEquals(passedModel(test.fake.calls[0].args), model);
+      assertStringIncludes(result.stdout, `\nagent: ${agent}\n`);
+      assertStringIncludes(result.stdout, "code: agent_fallback");
+      assertStringIncludes(result.stdout, `agent: ${preferred}`);
+      assertStringIncludes(result.stdout, `\nmodel: ${model}\n`);
+      assertStringIncludes(result.stdout, "완료");
+    }
+  }
+});
+
+Deno.test("Herdr에서도 선택한 CLI가 없으면 설치된 에이전트로 시작하고 둘 다 없으면 패널을 만들지 않는다", async () => {
+  await using dir = await createTempDir({ prefix: "delegate-test-" });
+  const test = setup(dir.path, "작업", [
+    ...completedUntilPostProcessing(codexPath(dir.path), `${prefix}작업`),
+    ...successfulCleanup(),
+  ], {
+    installed: ["codex"],
+    env: { HERDR_ENV: "1", CODEX_THREAD_ID: "caller" },
+  });
+  const result = await runDelegate(["prompt", "--agent", "claude"], test.deps);
+  assertEquals(result.code, 0, result.stdout);
+  assertStringIncludes(result.stdout, "code: agent_fallback");
+  assertStringIncludes(result.stdout, "\nagent: codex\n");
+  const start = test.fake.calls.find((call) => call.args[1] === "start")!;
+  assertEquals(start.args[start.args.indexOf("--kind") + 1], "codex");
+
+  for (const transport of ["direct", "herdr"]) {
+    const absent = setup(dir.path, "작업", [], {
+      installed: [],
+      env: { HERDR_ENV: "1", CODEX_THREAD_ID: "caller" },
+    });
+    const failed = await runDelegate(
+      ["prompt", "--transport", transport],
+      absent.deps,
+    );
+    assertEquals(failed.code, 5);
+    assertStringIncludes(failed.stdout, "code: agent_failed");
+    assertStringIncludes(failed.stdout, "codex");
+    assertStringIncludes(failed.stdout, "claude");
+    assertEquals(absent.fake.calls, []);
+  }
+});
+
+Deno.test("대체한 에이전트가 실패해도 대체 사유를 남기고 기존 세션은 다른 에이전트로 넘기지 않는다", async () => {
+  await using dir = await createTempDir({ prefix: "delegate-test-" });
+  for (const transport of ["direct", "herdr"]) {
+    const test = setup(dir.path, "작업", [
+      transport === "direct"
+        ? { cmd: "codex", code: 1, stderr: "execution failed" }
+        : herdrFailure("execution failed"),
+    ], {
+      installed: ["codex"],
+      env: { HERDR_ENV: "1", CODEX_THREAD_ID: "caller" },
+    });
+    const result = await runDelegate([
+      "prompt",
+      "--agent",
+      "claude",
+      "--transport",
+      transport,
+    ], test.deps);
+    assertEquals(result.code, transport === "direct" ? 5 : 3);
+    assertStringIncludes(result.stdout, "execution failed");
+    assertStringIncludes(result.stdout, "code: agent_fallback");
+    assertEquals(test.fake.calls.length, 1);
+  }
+
+  writeJsonl(codexPath(dir.path), [codexMeta(), ...codexTurn("old", "old")]);
+  const resume = setup(dir.path, "후속", [{
+    cmd: "codex",
+    onStart: () => {
+      throw new Deno.errors.NotFound("missing codex");
+    },
+  }], { installed: ["claude"] });
+  const resumed = await runDelegate(["prompt", codexId], resume.deps);
+  assertEquals(resumed.code, 5);
+  assertStringIncludes(resumed.stdout, "missing codex");
+  assertEquals(resumed.stdout.includes("agent_fallback"), false);
+  assertEquals(resume.fake.calls.map((call) => call.cmd), ["codex"]);
+});
+
+Deno.test({
+  name: "윈도에서 실행 경로를 따옴표로 감싸도 설치된 CLI로 작업을 마친다",
+  ignore: Deno.build.os !== "windows",
+  async fn() {
+    await using dir = await createTempDir({ prefix: "delegate test " });
+    const test = setup(dir.path, "작업", [directReply("codex")]);
+    const env: Record<string, string> = { ...test.deps.env };
+    env.Path = `"${env.PATH}"`;
+    delete env.PATH;
+    const result = await runDelegate(["prompt", "--agent", "codex"], {
+      ...test.deps,
+      env,
+    });
+    assertEquals(result.code, 0, result.stdout);
+    assertEquals(result.stdout.includes("agent_fallback"), false);
+    assertEquals(test.fake.calls.map((call) => call.cmd), ["codex"]);
+  },
+});
+
+Deno.test({
+  name:
+    "윈도 셸용 CLI는 Herdr에서 그대로 실행하고 직접 실행에서는 실행 가능한 에이전트를 고른다",
+  ignore: Deno.build.os !== "windows",
+  async fn() {
+    await using dir = await createTempDir({ prefix: "delegate-test-" });
+    for (const extension of [".cmd", ".ps1"]) {
+      for (const transport of ["herdr", "direct"]) {
+        const test = setup(
+          dir.path,
+          "작업",
+          transport === "direct" ? [directReply("claude")] : [
+            ...completedUntilPostProcessing(
+              codexPath(dir.path),
+              `${prefix}작업`,
+            ),
+            ...successfulCleanup(),
+          ],
+          {
+            installed: ["claude"],
+            env: { HERDR_ENV: "1", CODEX_THREAD_ID: "caller" },
+          },
+        );
+        Deno.writeTextFileSync(
+          join(test.deps.env.PATH, `codex${extension}`),
+          "",
+        );
+        const result = await runDelegate([
+          "prompt",
+          "--agent",
+          "codex",
+          "--transport",
+          transport,
+        ], test.deps);
+        assertEquals(result.code, 0, result.stdout);
+        assertEquals(
+          result.stdout.includes("agent_fallback"),
+          transport === "direct",
+        );
+        assertStringIncludes(
+          result.stdout,
+          `\nagent: ${transport === "direct" ? "claude" : "codex"}\n`,
+        );
+      }
+    }
+  },
+});
+
 Deno.test("직접 실행이 시작되지 않거나 제한 시간 초과·취소로 끝나면 실패 원인과 확인된 세션을 알린다", async () => {
   await using dir = await createTempDir({ prefix: "delegate-test-" });
   const failed = setup(dir.path, "작업", [{
@@ -4662,6 +4838,7 @@ function setup(
   prompt: string,
   responses: readonly FakeResponse[] = [],
   options: {
+    installed?: readonly ("codex" | "claude")[];
     env?: Record<string, string>;
     signal?: AbortSignal;
     now?: () => number;
@@ -4669,11 +4846,21 @@ function setup(
   } = {},
 ) {
   const fake = fakeExec(responses);
+  const bin = Deno.makeTempDirSync({ dir: root, prefix: "bin-" });
+  for (const agent of options.installed ?? ["codex", "claude"]) {
+    const path = join(
+      bin,
+      Deno.build.os === "windows" ? `${agent}.exe` : agent,
+    );
+    Deno.writeTextFileSync(path, "");
+    if (Deno.build.os !== "windows") Deno.chmodSync(path, 0o755);
+  }
   return {
     fake,
     deps: {
       exec: fake.exec,
       env: {
+        PATH: bin,
         HOME: root,
         CODEX_HOME: join(root, "codex"),
         CLAUDE_CONFIG_DIR: join(root, "claude"),

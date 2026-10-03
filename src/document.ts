@@ -66,6 +66,10 @@ export type DelegateDocument = {
 };
 
 export type DelegateWarning = {
+  code: "agent_fallback";
+  message: string;
+  agent: "codex" | "claude";
+} | {
   code: "cleanup_failed";
   message: string;
 } | {

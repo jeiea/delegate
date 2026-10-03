@@ -49,7 +49,7 @@ import {
   renderConversation,
   sessionIdPattern,
 } from "./native_session.ts";
-import { denoExec, type Exec } from "./process.ts";
+import { denoExec, type Exec, hasExecutable } from "./process.ts";
 import {
   type Agent,
   type AgentOption,
@@ -148,7 +148,7 @@ function parser() {
             choice(["auto", "same", "other", "codex", "claude"] as const),
             {
               description:
-                message`same·other는 호출자 기준이며 CODEX_THREAD_ID가 있으면 codex, 아니면 CLAUDECODE=1이면 claude. 호출자 모델은 알 수 없어 same은 같은 agent의 기본 모델. auto는 소속이 판정되는 첫 --model의 agent, 없으면 prompt 키워드로 추정. 기존 session은 감지된 agent를 사용하고 다르면 resume_option_ignored 경고`,
+                message`same·other는 호출자 기준이며 CODEX_THREAD_ID가 있으면 codex, 아니면 CLAUDECODE=1이면 claude. 호출자 모델은 알 수 없어 same은 같은 agent의 기본 모델. auto는 소속이 판정되는 첫 --model의 agent, 없으면 prompt 키워드로 추정. 새 session은 PATH에 선택된 CLI가 없으면 다른 agent로 대체하고 agent_fallback 경고. 둘 다 없으면 agent_failed 오류. 기존 session은 대체 없이 감지된 agent를 사용하고 다르면 resume_option_ignored 경고`,
             },
           ),
           "auto" as const,
@@ -221,7 +221,9 @@ session_id_unavailable: 시작 대기 상한 안에 Herdr의 native session ID�
 
 timeout: --timeout 초과. 확인된 session ID가 있으면 status 확인. 전달 확인 gate timeout 뒤라면 caller ID 라벨의 pane을 직접 확인·정리
 
-warnings[].code 대응 (마크다운 본문은 유효)
+warnings[].code 대응
+
+agent_fallback: 새 session에서 선택된 CLI를 PATH에서 찾지 못해 다른 agent로 대체. 경고의 agent는 원래 선택, 실제 agent·model은 최상위 필드 확인. 후속 실행 실패 시에도 대체 사유 유지
 
 cleanup_failed: 정리만 실패. 필요 시 close
 
@@ -387,6 +389,7 @@ export async function runDelegate(
   }
 
   const herdrDeps = runtimeDeps(deps);
+  const warnings: DelegateWarning[] = [];
   try {
     if (parsed.kind !== "prompt") {
       const snapshot = await findNativeSession(parsed.target, deps.env);
@@ -445,14 +448,31 @@ export async function runDelegate(
       ? undefined
       : await findNativeSession(parsed.target, deps.env);
     const requested = requestedAgent(parsed.agent, parsed.models, deps.env);
-    const agent = snapshot?.agent ?? requested ?? selectAgent(prompt).agent;
-    const warnings: DelegateWarning[] = requested == null || requested === agent
-      ? []
-      : [{
+    let agent = snapshot?.agent ?? requested ?? selectAgent(prompt).agent;
+    if (requested != null && requested !== agent) {
+      warnings.push({
         code: "resume_option_ignored",
         message: `감지된 agent=${agent}로 재개해 요청한 agent를 무시했습니다`,
         agent: requested,
-      }];
+      });
+    }
+    const executableOptions = { ...deps, shell: transport === "herdr" };
+    if (snapshot == null && !await hasExecutable(agent, executableOptions)) {
+      const fallback = agent === "codex" ? "claude" : "codex";
+      if (!await hasExecutable(fallback, executableOptions)) {
+        throw new DelegateError(
+          "agent_failed",
+          `PATH에서 ${agent}·${fallback} CLI를 찾을 수 없습니다. 둘 중 하나를 설치하세요`,
+        );
+      }
+      warnings.push({
+        code: "agent_fallback",
+        message:
+          `PATH에서 ${agent} CLI를 찾을 수 없어 ${fallback}로 대체했습니다`,
+        agent,
+      });
+      agent = fallback;
+    }
     const model = selectModel(agent, parsed.models);
     const request = {
       permission: parsed.permission ?? "write",
@@ -512,6 +532,7 @@ export async function runDelegate(
       if (diagnosed != null) {
         return failure(diagnosed, sessionId, undefined, "", {
           activity: "blocked",
+          warnings,
         });
       }
     }
@@ -528,6 +549,7 @@ export async function runDelegate(
       );
       if (diagnosed != null) {
         return failure(diagnosed, sessionId, undefined, "", {
+          warnings,
           ...(diagnosed.code === "agent_blocked"
             ? { activity: "blocked" as const }
             : {}),
@@ -543,12 +565,13 @@ export async function runDelegate(
         const snapshot = await findNativeSession(knownSessionId, deps.env);
         return failure(normalized, knownSessionId, snapshot.agent, "", {
           activity: "blocked",
+          warnings,
         });
       } catch {
         // 원래 blocked 진단을 native 재조회 실패로 덮지 않는다.
       }
     }
-    return failure(normalized, knownSessionId);
+    return failure(normalized, knownSessionId, undefined, "", { warnings });
   }
 }
 
@@ -609,6 +632,8 @@ async function executeDirect(
       ),
       sessionId,
       invocation.agent,
+      "",
+      { warnings: started.warnings },
     );
   }
   const parsed = invocation.agent === "codex"
@@ -625,6 +650,8 @@ async function executeDirect(
       ),
       parsed.sessionId ?? sessionId,
       invocation.agent,
+      "",
+      { warnings: started.warnings },
     );
   }
   if (
@@ -638,6 +665,8 @@ async function executeDirect(
       ),
       expectedSessionId,
       invocation.agent,
+      "",
+      { warnings: started.warnings },
     );
   }
   if (output.code !== 0 || parsed.sessionId == null || parsed.result == null) {
@@ -649,6 +678,8 @@ async function executeDirect(
       ),
       parsed.sessionId ?? sessionId,
       invocation.agent,
+      "",
+      { warnings: started.warnings },
     );
   }
   try {
@@ -661,6 +692,8 @@ async function executeDirect(
       ),
       expectedSessionId,
       invocation.agent,
+      "",
+      { warnings: started.warnings },
     );
   }
   return success({
@@ -723,16 +756,18 @@ function failure(
   sessionId?: string,
   agent?: Agent,
   stderr = "",
-  context: Pick<DelegateDocument, "activity"> = {},
+  context: Pick<DelegateDocument, "activity" | "warnings"> = {},
 ) {
   const publicSessionId = sessionId != null && sessionIdPattern.test(sessionId)
     ? sessionId as NativeSessionId
     : undefined;
+  const { warnings, ...metadata } = context;
   return {
     stdout: renderDocument({
       ...(publicSessionId == null ? {} : { session_id: publicSessionId }),
       ...(agent == null ? {} : { agent }),
-      ...context,
+      ...metadata,
+      ...(warnings?.length ? { warnings } : {}),
       error: {
         code: error.code,
         message: error.message,
