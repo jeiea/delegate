@@ -80,7 +80,7 @@ class LiveAgentListError extends DelegateError {}
 
 const paneLockWaitMs = 60_000;
 const activityGateMs = 30_000;
-const identityPollMs = 5_000;
+const identityPollMs = 10_000;
 const recoveryMs = 500;
 const diagnosticMs = 1_000;
 
@@ -219,11 +219,11 @@ export async function promptHerdr(
           executionDeps,
         );
       } catch (error) {
-        const retainPane = error instanceof RetainPaneError ||
-          started.deliveryUncertain;
         const preserved = copyDelegateError(normalizeError(error), {
           retry: started.retry,
         });
+        const retainPane = error instanceof RetainPaneError ||
+          started.deliveryUncertain || isLifecycleError(preserved);
         if (!retainPane && preserved.code !== "agent_blocked") {
           await recoverOwnedPane(
             started.ownership,
@@ -388,19 +388,24 @@ async function diagnosePane(
         : objectValue(result.agent);
       const reportedName = stringValue(payload.name) ??
         stringValue(payload.agent_name);
+      const expectedSessionId = error.sessionId ?? target.sessionId;
       const sameAgent = (reportedName == null ||
         reportedName === target.name) &&
         (reported.cwd == null || reported.cwd === target.cwd) &&
         (reported.kind == null || reported.kind === target.agent) &&
-        (reported.sessionId == null || target.sessionId == null ||
-          reported.sessionId.toLowerCase() === target.sessionId.toLowerCase());
+        (reported.sessionId == null || expectedSessionId == null ||
+          reported.sessionId.toLowerCase() === expectedSessionId.toLowerCase());
       if (!sameAgent) return error;
+      if (
+        target.strictPane && reported.paneId != null &&
+        reported.paneId !== target.paneId
+      ) return error;
+      error = copyDelegateError(error, {
+        sessionId: readReportedSessionId(reported, expectedSessionId),
+      });
       if (reported.paneId == null) {
         checkPane = true;
       } else {
-        if (target.strictPane && reported.paneId !== target.paneId) {
-          return error;
-        }
         confirmed = true;
         paneId = reported.paneId;
       }

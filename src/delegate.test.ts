@@ -14,7 +14,7 @@ const prefix = "delegate 스킬 등 다른 에이전트 재위임 금지.\n\n";
 
 // Herdr codex prompt
 
-Deno.test("코덱스에 파일로 요청하면 지정한 추론 강도로 작업을 마치고 대화 기록을 남긴 뒤 패널을 닫는다", async () => {
+Deno.test("코덱스 연결이 늦어져도 파일 요청을 지정한 추론 강도로 마치고 대화 기록을 남긴 뒤 패널을 닫는다", async () => {
   await using dir = await createTempDir({ prefix: "delegate-test-" });
   const promptPath = join(dir.path, "prompt.md");
   const nativePath = codexPath(dir.path);
@@ -47,6 +47,7 @@ Deno.test("코덱스에 파일로 요청하면 지정한 추론 강도로 작업
           ),
         ]),
     }),
+    herdr({ agent: unidentifiedAgent("working", 1) }),
     herdr({ agent: currentAgent("working", 1) }),
     herdr({}),
     herdr({ agent: liveAgent("done", 2) }),
@@ -56,7 +57,7 @@ Deno.test("코덱스에 파일로 요청하면 지정한 추론 강도로 작업
     env: { HERDR_ENV: "1" },
     now: () => now,
     sleep: (ms) => {
-      now += ms;
+      now += now === 0 ? 6_000 : ms;
       return Promise.resolve();
     },
   });
@@ -72,10 +73,11 @@ Deno.test("코덱스에 파일로 요청하면 지정한 추론 강도로 작업
     "--effort",
     "high",
     "--timeout",
-    "1s",
+    "1m",
   ], test.deps);
 
   assertEquals(result.code, 0);
+  assertEquals(now >= 6_000, true);
   assertStringIncludes(result.stdout, `session_id: ${codexId}`);
   assertEquals(result.stdout.includes("intervening_prompts:"), false);
   assertStringIncludes(result.stdout, "\n\n완료\n");
@@ -110,6 +112,181 @@ Deno.test("코덱스에 파일로 요청하면 지정한 추론 강도로 작업
   assertStringIncludes(logs.stdout, "다른 문자열이어도 공식 ID를 따릅니다");
   assertEquals(logs.stdout.includes("AGENTS 지침"), false);
   assertEquals(logs.stdout.includes("스킬 지침"), false);
+});
+
+Deno.test("연결 실패 진단에서 확인된 코덱스 세션으로 요청을 다시 보내지 않고 결과 회수를 마친다", async () => {
+  for (const paneLookup of ["complete", "failed"] as const) {
+    await using dir = await createTempDir({ prefix: "delegate-test-" });
+    let now = 0;
+    const diagnostic = herdr({ agent: {} });
+    const test = setup(dir.path, "작업", [
+      ...newTabAllocation(),
+      herdr({ agent: unidentifiedAgent("working", 1) }),
+      herdr({ agent: unidentifiedAgent("working", 1) }),
+      herdr({ agent: unidentifiedAgent("working", 1) }),
+      diagnostic,
+      ...(paneLookup === "failed"
+        ? [herdrFailure("pane unavailable")]
+        : [{ cmd: "herdr", stdout: "작업 실행 중\n" }]),
+    ], {
+      env: { HERDR_ENV: "1" },
+      now: () => now,
+      sleep: () => {
+        now += 10_000;
+        return Promise.resolve();
+      },
+    });
+    diagnostic.onStart = () => {
+      const name = test.fake.calls.find((call) => call.args[1] === "start")
+        ?.args[2];
+      diagnostic.stdout = JSON.stringify({
+        result: {
+          agent: {
+            ...currentAgent("working", 1),
+            name,
+            ...(paneLookup === "complete" ? { pane_id: "pane-delegate" } : {}),
+          },
+        },
+      });
+      writeJsonl(codexPath(dir.path), [
+        codexMeta(),
+        ...codexTurn("late", `${prefix}작업`, "늦게 연결된 작업 완료"),
+      ]);
+    };
+    const first = await runDelegate([
+      "prompt",
+      "--agent",
+      "codex",
+      "--caller-id",
+      "caller",
+      "--timeout",
+      "1m",
+    ], test.deps);
+    assertEquals(now, 10_000);
+    assertEquals(first.code, 5);
+    assertStringIncludes(first.stdout, `session_id: ${codexId}`);
+    if (paneLookup === "complete") {
+      assertStringIncludes(first.stdout, "pane_id: pane-delegate");
+      assertStringIncludes(first.stdout, "작업 실행 중");
+    }
+    assertEquals(
+      test.fake.calls.some((call) => call.args[1] === "close"),
+      false,
+    );
+
+    const name = test.fake.calls.find((call) =>
+      call.args[1] === "start"
+    )!.args[2];
+    const live = { ...liveAgent("done", 2), name };
+    const recovered = setup(dir.path, "", [
+      herdr({ agents: [live] }),
+      herdr({ agent: live }),
+      herdr({ agent: live }),
+      herdr({}),
+    ]);
+    const waited = await runDelegate(["wait", codexId], {
+      ...recovered.deps,
+      env: test.deps.env,
+    });
+    assertEquals(waited.code, 0);
+    assertStringIncludes(waited.stdout, "늦게 연결된 작업 완료");
+    assertEquals(
+      recovered.fake.calls.some((call) => call.args[1] === "prompt"),
+      false,
+    );
+    assertEquals(
+      recovered.fake.calls.filter((call) => call.args[1] === "close").map((
+        call,
+      ) => call.args),
+      [["pane", "close", "pane-delegate"]],
+    );
+  }
+});
+
+Deno.test("코덱스 연결 대기 중 시간이 만료되거나 취소되면 전달한 작업의 패널을 보존한다", async () => {
+  for (const interruption of ["timeout", "cancelled"] as const) {
+    await using dir = await createTempDir({ prefix: "delegate-test-" });
+    let now = 0;
+    const controller = new AbortController();
+    const test = setup(dir.path, "작업", [
+      ...newTabAllocation(),
+      herdr({ agent: unidentifiedAgent("working", 1) }),
+      herdr({ agent: unidentifiedAgent("working", 1) }),
+      herdr({ agent: unidentifiedAgent("working", 1) }),
+      herdr({}),
+    ], {
+      env: { HERDR_ENV: "1" },
+      signal: controller.signal,
+      now: () => now,
+      sleep: () => {
+        now += 5_000;
+        if (interruption === "cancelled") controller.abort();
+        return Promise.resolve();
+      },
+    });
+    const result = await runDelegate([
+      "prompt",
+      "--agent",
+      "codex",
+      "--caller-id",
+      "caller",
+      "--timeout",
+      "5s",
+    ], test.deps);
+    assertEquals(result.code, interruption === "timeout" ? 6 : 130);
+    assertStringIncludes(result.stdout, `code: ${interruption}`);
+    assertEquals(
+      test.fake.calls.filter((call) => call.args[1] === "prompt").length,
+      1,
+    );
+    assertEquals(
+      test.fake.calls.some((call) => call.args[1] === "close"),
+      false,
+    );
+  }
+});
+
+Deno.test("잘못된 코덱스 시작 정보를 진단해도 검증되지 않은 세션 ID를 공개하지 않는다", async () => {
+  await using dir = await createTempDir({ prefix: "delegate-test-" });
+  const invalid = {
+    ...currentAgent("working", 1),
+    agent_session: { kind: "id", value: "invalid-id" },
+  };
+  const diagnostic = herdr({ agent: {} });
+  const pane = herdr({ pane: {} });
+  const test = setup(dir.path, "작업", [
+    ...newTabAllocation(),
+    herdr({ agent: invalid }),
+    herdrFailure("close refused"),
+    diagnostic,
+    pane,
+    { cmd: "herdr", stdout: "현재 코덱스 화면\n" },
+  ], { env: { HERDR_ENV: "1" } });
+  diagnostic.onStart = () => {
+    const name = test.fake.calls.find((call) => call.args[1] === "start")
+      ?.args[2];
+    diagnostic.stdout = JSON.stringify({
+      result: { agent: { ...invalid, name, pane_id: "pane-delegate" } },
+    });
+    pane.stdout = JSON.stringify({
+      result: { pane: { pane_id: "pane-delegate", agent: name } },
+    });
+  };
+  const result = await runDelegate([
+    "prompt",
+    "--agent",
+    "codex",
+    "--caller-id",
+    "caller",
+  ], test.deps);
+  assertEquals(result.code, 5);
+  assertStringIncludes(result.stdout, "code: invalid_native_session");
+  assertStringIncludes(result.stdout, "pane_id: pane-delegate");
+  assertEquals(result.stdout.includes("session_id:"), false);
+  assertEquals(
+    test.fake.calls.some((call) => call.args[1] === "prompt"),
+    false,
+  );
 });
 
 Deno.test("현재 코덱스 작업 공간을 찾지 못하면 위임을 거부하고 위치가 확인되면 그곳에서 검토를 마친다", async () => {
@@ -1714,7 +1891,7 @@ Deno.test("작업용 셸을 다시 시작한 뒤 요청 처리에 실패해도 �
         if (failure === "raw" && sleepCalls === 2) {
           throw new Error("session lookup exploded");
         }
-        if (identityPolling) now += 5_000;
+        if (identityPolling) now += 10_000;
         return Promise.resolve();
       },
     });
@@ -1768,7 +1945,7 @@ Deno.test("작업용 셸을 다시 시작한 뒤 요청 처리에 실패해도 �
     }
     if (failure === "id-unavailable") {
       assertStringIncludes(result.stdout, "code: session_id_unavailable");
-      assertEquals(now, 5_000);
+      assertEquals(now, 10_000);
     }
     if (failure === "native-missing") {
       assertStringIncludes(result.stdout, "code: invalid_native_session");
@@ -1821,7 +1998,7 @@ Deno.test("코덱스 훅 승인 때문에 요청이 진행되지 않으면 패�
     env: { HERDR_ENV: "1" },
     now: () => now,
     sleep: () => {
-      now += 5_000;
+      now += 10_000;
       return Promise.resolve();
     },
   });
@@ -2176,7 +2353,7 @@ Deno.test("허더 작업의 제한 시간이 지나면 시작에 실패한 패�
     env: { HERDR_ENV: "1" },
     now: () => unidentifiedNow,
     sleep: () => {
-      unidentifiedNow += 5_000;
+      unidentifiedNow += 10_000;
       return Promise.resolve();
     },
   });
@@ -2194,7 +2371,7 @@ Deno.test("허더 작업의 제한 시간이 지나면 시작에 실패한 패�
     unidentifiedResult.stdout,
     "code: session_id_unavailable",
   );
-  assertEquals(unidentifiedNow, 5_000);
+  assertEquals(unidentifiedNow, 10_000);
   assertEquals(
     unidentified.fake.calls.some((call) =>
       ["pane", "tab"].includes(call.args[0] ?? "") &&
@@ -3051,7 +3228,7 @@ Deno.test("클로드에 요청한 뒤 차단되면 기록이 없어도 패널 �
     env: { HERDR_ENV: "1" },
     now: () => now,
     sleep: () => {
-      now += 5_000;
+      now += 10_000;
       return Promise.resolve();
     },
   });

@@ -26,6 +26,8 @@ allowed-tools: Bash(herdr *) Bash(deno run *)
 
 # 실행
 
+- Herdr 환경에서는 연결 문제 진단·복구 우선
+- `direct` 필요 시 사용 전 유저에게 필요 사유·Herdr 진단 결과 보고
 - 옵션·출력 필드·오류·경고 대응은 `--help` 확인
   - herdr 예외는 `herdr --skill` 확인
 - 호스트 도구가 백그라운드 실행 ID를 반환하면 그 실행을 기다려 최종 출력·종료
