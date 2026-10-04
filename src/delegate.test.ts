@@ -923,6 +923,13 @@ Deno.test("사용자 응답을 기다리는 작업은 즉시 차단을 알리고
   assertStringIncludes(result.stdout, `session_id: ${codexId}`);
   assertStringIncludes(result.stdout, "pane_id: pane-delegate");
   assertStringIncludes(result.stdout, "Approve action?");
+  assertEquals(result.stdout.includes("코덱스 샌드박스 권한 허용"), false);
+  assertEquals(result.stdout.includes("메인 세션"), false);
+  assertEquals(result.stdout.includes("herdr pane read"), false);
+  assertStringIncludes(
+    result.stdout,
+    "herdr pane send-keys pane-delegate <KEY>...",
+  );
   assertEquals(sleeps, 0);
   assertEquals(
     test.fake.calls.some((call) => call.args[1] === "close"),
@@ -1451,6 +1458,10 @@ Deno.test("에이전트가 사용자 입력을 기다리거나 시작 직후 종
     assertStringIncludes(result.stdout, reason);
     assertStringIncludes(result.stdout, "prompt를 제출하지 않았습니다");
     assertStringIncludes(result.stdout, "pane_id: pane-delegate");
+    assertStringIncludes(
+      result.stdout,
+      "herdr pane send-keys pane-delegate <KEY>...",
+    );
     assertEquals(result.stdout.includes("blockers:"), false);
     assertStringIncludes(result.stdout, "Trust this folder?\n``` suspicious\n");
     assertStringIncludes(result.stdout, "````text\nTrust this folder?");
@@ -1536,6 +1547,7 @@ Deno.test("시작이 차단되면 에이전트 조회가 불완전해도 연결�
   ], unverified.deps);
   assertEquals(result.code, 4);
   assertEquals(result.stdout.includes("pane_id:"), false);
+  assertEquals(result.stdout.includes("herdr pane send-keys"), false);
   assertEquals(
     unverified.fake.calls.some((call) => call.args[1] === "read"),
     false,
@@ -4749,7 +4761,7 @@ Deno.test("스킬 출력을 요청하면 현재 CLI 주소로 실행하는 완�
   assertEquals(test.fake.calls, []);
 });
 
-Deno.test("시작 차단 도움말은 pane 화면과 사전 발급 UUID의 기록 부재를 안내한다", async () => {
+Deno.test("시작 차단 도움말은 키 입력 명령과 pane 화면·기록 부재를 안내한다", async () => {
   await using dir = await createTempDir({ prefix: "delegate-test-" });
   const result = await runDelegate(
     ["prompt", "--help"],
@@ -4758,6 +4770,13 @@ Deno.test("시작 차단 도움말은 pane 화면과 사전 발급 UUID의 기�
 
   assertEquals(result.code, 0);
   assertStringIncludes(result.stdout, "error.pane.pane_id");
+  assertEquals(result.stdout.includes("코덱스 샌드박스 권한 허용"), false);
+  assertEquals(result.stdout.includes("메인 세션"), false);
+  assertEquals(result.stdout.includes("herdr pane read"), false);
+  assertStringIncludes(
+    result.stdout,
+    "herdr pane send-keys <PANE_ID> <KEY>...",
+  );
   assertStringIncludes(
     result.stdout,
     "native 기록 파일은 아직 없을 수 있음",

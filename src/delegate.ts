@@ -211,6 +211,8 @@ Herdr는 성공하면 관리 pane을 자동 정리하며 마지막 pane 뒤 빈 
 
 agent_blocked: 사용자 입력 대기 또는 시작 직후 종료. 확인된 error.pane.pane_id와 마크다운 본문의 현재 화면을 보고 차단을 해소. 시작 차단은 prompt 미제출. session_id는 미리 발급된 UUID일 수 있으며 native 기록 파일은 아직 없을 수 있음. 파일이 없다면 원래 prompt를 재제출하기 전에 pane 상태를 확인하고, 필요 시 보존 pane을 명시적으로 정리
 
+- ${sendKeysGuide("<PANE_ID>")}; <PANE_ID>는 error.pane.pane_id
+
 invalid_native_session: pane이 확인되면 error.pane.pane_id와 현재 화면을 반환. 차단 해소 뒤에도 native 기록 파일이 없을 수 있으므로 pane을 확인하고 필요 시 정리
 
 live_option_conflict: 실행 중 session에 --permission·--effort·--add-dir 지정
@@ -770,7 +772,9 @@ function failure(
       ...(warnings?.length ? { warnings } : {}),
       error: {
         code: error.code,
-        message: error.message,
+        message: error.code === "agent_blocked" && error.pane != null
+          ? `${error.message}\n- ${sendKeysGuide(error.pane.pane_id)}`
+          : error.message,
         ...(error.pane == null ? {} : { pane: error.pane }),
       },
       ...(error.screen == null ? {} : { screen: error.screen }),
@@ -779,6 +783,10 @@ function failure(
     stderr,
     code: exitCode(error.code),
   };
+}
+
+function sendKeysGuide(paneId: string): string {
+  return `키 입력: herdr pane send-keys ${paneId} <KEY>... (예: up, down, enter, esc)`;
 }
 
 function tail(text: string, lines: number): string {
