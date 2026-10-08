@@ -952,7 +952,8 @@ async function startAgent(
     return agentFromResult(result, name);
   };
   let retry: RetryRecord | undefined;
-  let started: LiveAgent;
+  let started: LiveAgent | undefined;
+  let blocked: DelegateError | undefined;
   try {
     try {
       started = await start();
@@ -980,22 +981,25 @@ async function startAgent(
   } catch (error) {
     const normalized = normalizeError(error);
     if (normalized.code !== "agent_blocked") throw normalized;
-    const trusted = await acceptClaudeTrust(request, {
-      name,
-      paneId: pane.paneId,
-      deadline,
-      deps,
-    });
-    if (trusted == null) {
-      throw new DelegateError(
-        "agent_blocked",
-        `${normalized.message}; agent start가 완료되지 않아 prompt를 제출하지 않았습니다`,
-        undefined,
-        normalized.sessionId,
-        normalized.retry,
-      );
-    }
-    started = trusted;
+    blocked = normalized;
+  }
+  started = await acceptClaudeTrust(request, {
+    name,
+    paneId: pane.paneId,
+    started,
+    deadline,
+    deps,
+  });
+  if (started == null) {
+    throw new DelegateError(
+      "agent_blocked",
+      `${
+        blocked?.message ?? "폴더 신뢰 수락 뒤 입력창이 나타나지 않았습니다"
+      }; agent start가 완료되지 않아 prompt를 제출하지 않았습니다`,
+      undefined,
+      blocked?.sessionId,
+      blocked?.retry,
+    );
   }
   return {
     live: mergeReportedLive({
@@ -1011,19 +1015,22 @@ async function startAgent(
 
 // 영어 문구·❯ 포커스·두 선택지에 의존하는 우회로, 공개 신뢰 건너뛰기 플래그가 생기면 제거한다.
 // 문구·화면 형식 변경이나 수락 실패는 기존 agent_blocked로 돌아가며, 포함된 화면으로 진단한다.
+// 시작 성공 보고에도 화면을 확인한다. 좁은 pane에서는 신뢰 문구가 줄바꿈돼 Herdr가 차단 대신 idle을 보고한다.
 async function acceptClaudeTrust(
   request: HerdrPrompt,
-  { name, paneId, deadline, deps }: {
+  { name, paneId, started, deadline, deps }: {
     name: string;
     paneId: string;
+    started?: LiveAgent;
     deadline: number;
     deps: HerdrDeps;
   },
 ): Promise<LiveAgent | undefined> {
-  if (request.invocation.agent !== "claude") return;
+  if (request.invocation.agent !== "claude") return started;
   const cwd = request.snapshot?.cwd ?? request.cwd;
-  try {
-    ensureTime(deadline, deps, request.snapshot?.sessionId);
+  const sessionId = request.snapshot?.sessionId;
+  const read = async () => {
+    ensureTime(deadline, deps, sessionId);
     const screen = await deps.exec(deps.env.HERDR_BIN_PATH ?? "herdr", [
       "pane",
       "read",
@@ -1031,13 +1038,21 @@ async function acceptClaudeTrust(
       "--source",
       "visible",
     ], { cwd, env: deps.env, signal: executionSignal(deps) });
-    ensureTime(deadline, deps, request.snapshot?.sessionId);
-    if (screen.code !== 0) return;
-    const keys = claudeTrustKeys(screen.stdout);
-    if (keys == null) return;
+    ensureTime(deadline, deps, sessionId);
+    return screen.code === 0 ? screen.stdout : undefined;
+  };
+  let keys: string[] | undefined;
+  try {
+    const screen = await read();
+    keys = screen == null ? undefined : claudeTrustKeys(screen);
+  } catch {
+    ensureTime(deadline, deps, sessionId);
+  }
+  if (keys == null) return started;
+  try {
     await json(cwd, deps, ["agent", "send-keys", name, ...keys]);
-    ensureTime(deadline, deps, request.snapshot?.sessionId);
-    const started = agentFromResult(
+    ensureTime(deadline, deps, sessionId);
+    const accepted = agentFromResult(
       await json(cwd, deps, [
         "agent",
         "wait",
@@ -1049,11 +1064,25 @@ async function acceptClaudeTrust(
       ]),
       name,
     );
-    ensureTime(deadline, deps, request.snapshot?.sessionId);
-    if (started.status === "idle") return started;
+    ensureTime(deadline, deps, sessionId);
+    if (accepted.status !== "idle") return;
+    // Herdr는 입력창이 그려지기 전에 idle을 보고하며, 그 사이 제출한 prompt는 사라진다.
+    const readyDeadline = Math.min(deadline, deps.now() + activityGateMs);
+    while (remaining(readyDeadline, deps) > 0) {
+      const screen = await read();
+      if (
+        screen != null && claudeTrustKeys(screen) == null &&
+        screen.split("\n").some((line) => line.trim() === "❯")
+      ) return accepted;
+      await pause(
+        Math.min(100, remaining(readyDeadline, deps)),
+        deps,
+        sessionId,
+      );
+    }
   } catch {
     // 호출자 중단·전체 기한은 재전파하고, 허더 호출 실패는 시작 차단으로 남긴다.
-    ensureTime(deadline, deps, request.snapshot?.sessionId);
+    ensureTime(deadline, deps, sessionId);
   }
 }
 

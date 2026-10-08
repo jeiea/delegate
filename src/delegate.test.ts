@@ -2864,18 +2864,21 @@ Deno.test("클로드 신뢰 수락 중 취소되거나 전체 시간이 만료�
   }
 });
 
-Deno.test("클로드는 모든 권한 모드에서 폴더 신뢰를 한 번 수락하고 준비된 뒤 요청을 제출한다", async () => {
+Deno.test("클로드는 시작 화면에 폴더 신뢰 확인이 보이면 권한 모드·차단 보고와 관계없이 한 번 수락하고 입력창이 나타난 뒤 요청을 제출한다", async () => {
   for (
-    const { permission, timeout, remaining } of [
+    const { permission, timeout, remaining, start } of [
       {
         permission: "read-only",
         timeout: "2s",
         remaining: "1750",
+        start: herdrError("agent_not_ready", "Trust required"),
       },
+      // 좁은 pane에서는 신뢰 문구가 줄바꿈돼 Herdr가 차단 대신 idle을 보고한다.
       {
         permission: "write",
         timeout: "60s",
         remaining: "30000",
+        start: herdr({ agent: unidentifiedClaude("idle", 0) }),
       },
     ]
   ) {
@@ -2883,7 +2886,7 @@ Deno.test("클로드는 모든 권한 모드에서 폴더 신뢰를 한 번 수�
     let now = 0;
     const test = setup(dir.path, "작업", [
       ...newTabAllocation(),
-      herdrError("agent_not_ready", "Trust required"),
+      start,
       { cmd: "herdr", stdout: "❯ No, exit\n  Yes, I trust this folder\n" },
       herdr({}, {
         onStart: () => {
@@ -2891,6 +2894,9 @@ Deno.test("클로드는 모든 권한 모드에서 폴더 신뢰를 한 번 수�
         },
       }),
       herdr({ agent: unidentifiedClaude("idle", 1) }),
+      // 신뢰 화면이 닫힌 직후에는 입력창이 아직 그려지지 않아 제출한 prompt가 사라진다.
+      { cmd: "herdr", stdout: "➜  project  claude\n" },
+      readyClaudeScreen(),
       herdr({ agent: unidentifiedClaude("working", 2) }, {
         onStart: () => {
           const start = test.fake.calls.find((call) =>
@@ -2937,7 +2943,7 @@ Deno.test("클로드는 모든 권한 모드에서 폴더 신뢰를 한 번 수�
     const name = test.fake.calls.find((call) =>
       call.args[1] === "start"
     )!.args[2];
-    assertEquals(test.fake.calls.slice(4, 7).map((call) => call.args), [
+    assertEquals(test.fake.calls.slice(4, 9).map((call) => call.args), [
       ["pane", "read", "pane-delegate", "--source", "visible"],
       ["agent", "send-keys", name, "down", "enter"],
       [
@@ -2949,8 +2955,10 @@ Deno.test("클로드는 모든 권한 모드에서 폴더 신뢰를 한 번 수�
         "--timeout",
         remaining,
       ],
+      ["pane", "read", "pane-delegate", "--source", "visible"],
+      ["pane", "read", "pane-delegate", "--source", "visible"],
     ]);
-    assertEquals(test.fake.calls[7]?.args.slice(0, 4), [
+    assertEquals(test.fake.calls[9]?.args.slice(0, 4), [
       "agent",
       "prompt",
       name,
@@ -2963,17 +2971,29 @@ Deno.test("클로드는 모든 권한 모드에서 폴더 신뢰를 한 번 수�
   }
 });
 
-Deno.test("클로드 폴더 신뢰 수락 후에도 차단되거나 실패하면 요청을 보류하고 현재 화면을 보여준다", async () => {
-  for (const outcome of ["blocked", "timeout"] as const) {
+Deno.test("클로드 폴더 신뢰 수락 후에도 차단되거나 실패하거나 입력창이 나타나지 않으면 요청을 보류하고 현재 화면을 보여준다", async () => {
+  for (const outcome of ["blocked", "timeout", "no-input"] as const) {
     await using dir = await createTempDir({ prefix: "delegate-test-" });
+    let now = 0;
     const test = setup(dir.path, "작업", [
       ...newTabAllocation(),
       herdrError("agent_not_ready", "Trust required"),
       { cmd: "herdr", stdout: "❯ No, exit\n  Yes, I trust this folder\n" },
       herdr({}),
-      outcome === "blocked"
-        ? herdr({ agent: unidentifiedClaude("blocked", 1) })
-        : herdrError("timeout", "wait expired"),
+      ...(outcome === "blocked"
+        ? [herdr({ agent: unidentifiedClaude("blocked", 1) })]
+        : outcome === "timeout"
+        ? [herdrError("timeout", "wait expired")]
+        : [
+          herdr({ agent: unidentifiedClaude("idle", 1) }),
+          {
+            cmd: "herdr",
+            stdout: "➜  project  claude\n",
+            onStart: () => {
+              now = 30_000;
+            },
+          },
+        ]),
       herdr({
         agent: {
           ...unidentifiedClaude("blocked", 1),
@@ -2981,7 +3001,7 @@ Deno.test("클로드 폴더 신뢰 수락 후에도 차단되거나 실패하면
         },
       }),
       { cmd: "herdr", stdout: "Current blocked screen\n" },
-    ], { env: { HERDR_ENV: "1" } });
+    ], { env: { HERDR_ENV: "1" }, now: () => now });
     const result = await runDelegate([
       "prompt",
       "--agent",
@@ -3017,6 +3037,7 @@ Deno.test("허더에서 클로드 작업을 시작하면 지정한 이름과 추
       root_pane: { pane_id: "pane-delegate" },
     }),
     herdr({ agent: unidentifiedClaude("working", 1) }),
+    readyClaudeScreen(),
     herdr({ agent: unidentifiedClaude("working", 1) }, {
       onStart: () => {
         const start = test.fake.calls.find((call) => call.args[1] === "start");
@@ -3106,6 +3127,7 @@ Deno.test("허더에서 클로드 작업을 시작하면 지정한 이름과 추
   const mismatch = setup(mismatchDir.path, "불일치", [
     ...newTabAllocation(),
     herdr({ agent: currentClaude("working", 1) }),
+    readyClaudeScreen(),
     herdr({}),
     herdr({ panes: [] }),
     herdr({}),
@@ -3232,6 +3254,7 @@ Deno.test("클로드에 요청한 뒤 차단되면 기록이 없어도 패널 �
   const test = setup(dir.path, "작업", [
     ...newTabAllocation(),
     herdr({ agent: unidentifiedClaude("working", 1) }),
+    readyClaudeScreen(),
     herdr({ agent: unidentifiedClaude("blocked", 2) }),
     identity,
     diagnostic,
@@ -5055,6 +5078,10 @@ function herdrError(code: string, message: string): FakeResponse {
     code: 1,
     stderr: JSON.stringify({ error: { code, message } }),
   };
+}
+
+function readyClaudeScreen(): FakeResponse {
+  return { cmd: "herdr", stdout: "─────\n❯ \n─────\n" };
 }
 
 function newTabAllocation(): FakeResponse[] {
