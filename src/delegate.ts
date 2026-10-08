@@ -53,6 +53,7 @@ import { denoExec, type Exec, hasExecutable } from "./process.ts";
 import {
   type Agent,
   type AgentOption,
+  callerSessionId,
   type Effort,
   type NativeInvocation,
   parseDuration,
@@ -186,7 +187,7 @@ function parser() {
         )),
         callerId: optional(option("--caller-id", string({ metavar: "ID" }), {
           description:
-            message`호출자 세션 ID. 관리 탭 이름과 표시 이름 접두사. Codex는 CODEX_THREAD_ID 자동, Claude는 스크래치패드 경로 UUID 전달`,
+            message`호출자 세션 ID. 관리 탭 이름과 표시 이름 접두사. 생략 시 CODEX_THREAD_ID·CLAUDE_CODE_SESSION_ID 순으로 자동`,
         })),
         name: optional(option("--name", string({ metavar: "NAME" }), {
           description:
@@ -483,7 +484,7 @@ export async function runDelegate(
       effort: parsed.effort,
       prompt,
       model,
-      callerId: parsed.callerId ?? deps.env.CODEX_THREAD_ID,
+      callerId: parsed.callerId ?? callerSessionId(deps.env),
       name: parsed.name,
       resumeSessionId: snapshot?.sessionId,
     };

@@ -22,7 +22,6 @@ allowed-tools: Bash(herdr *) Bash(deno run *)
 - 읽기 전용 필요 시 `--permission read-only`
 - 프롬프트는 heredoc 표준 입력 또는 `--prompt-file`로 전달
   - 실제 개행 사용, 실행 후 표준 입력 전달 금지
-- 클로드 호출자는 스크래치패드 UUID를 `--caller-id`로 전달
 
 # 실행
 

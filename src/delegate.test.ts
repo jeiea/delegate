@@ -3027,7 +3027,7 @@ Deno.test("클로드 폴더 신뢰 수락 후에도 차단되거나 실패하거
   }
 });
 
-Deno.test("허더에서 클로드 작업을 시작하면 지정한 이름과 추론 강도를 적용하고 발급한 세션과 다른 응답은 거부한다", async () => {
+Deno.test("클로드 세션이 허더에서 클로드 작업을 시작하면 호출 세션 탭에서 지정한 이름과 추론 강도를 적용하고 발급한 세션과 다른 응답은 거부한다", async () => {
   await using dir = await createTempDir({ prefix: "delegate-test-" });
   const test = setup(dir.path, "화면 작업", [
     herdr({ pane: { workspace_id: "ws-1", tab_id: "current" } }),
@@ -3075,14 +3075,18 @@ Deno.test("허더에서 클로드 작업을 시작하면 지정한 이름과 추
     herdr({ agent: unidentifiedClaude("done", 2) }),
     herdr({ agent: unidentifiedClaude("done", 2) }),
     herdr({}),
-  ], { env: { HERDR_ENV: "1" } });
+  ], {
+    env: {
+      HERDR_ENV: "1",
+      CLAUDECODE: "1",
+      CLAUDE_CODE_SESSION_ID: "caller-claude",
+    },
+  });
 
   const started = await runDelegate([
     "prompt",
     "--agent",
     "claude",
-    "--caller-id",
-    "caller-claude",
     "--name",
     "화면",
     "--effort",
@@ -3090,6 +3094,11 @@ Deno.test("허더에서 클로드 작업을 시작하면 지정한 이름과 추
   ], test.deps);
   assertEquals(started.code, 0);
   assertStringIncludes(started.stdout, "\n\n완료\n");
+  assertEquals(
+    test.fake.calls.find((call) => call.args[1] === "create")?.args
+      .includes("caller-claude"),
+    true,
+  );
   const start = test.fake.calls.find((call) => call.args[1] === "start");
   assertEquals(start?.args.includes("--name=caller-claude 화면"), true);
   assertEquals(start?.args.includes("--effort=high"), true);
@@ -3398,6 +3407,9 @@ Deno.test("클로드와 코덱스에 직접 요청하면 공개 진행 상황과
         HERDR_ENV: "1",
         HERDR_WORKSPACE_ID: "private-workspace",
         KEEP_ME: "yes",
+        ...(agent === "claude"
+          ? { CLAUDECODE: "1", CLAUDE_CODE_SESSION_ID: "caller-claude" }
+          : {}),
       },
     });
     const result = await runDelegate([
@@ -3428,6 +3440,12 @@ Deno.test("클로드와 코덱스에 직접 요청하면 공개 진행 상황과
       ),
       true,
     );
+    if (agent === "claude") {
+      assertEquals(
+        test.fake.calls[0]?.args.includes("--name=caller-claude"),
+        true,
+      );
+    }
     assertEquals(
       test.fake.calls[0]?.args.some((arg) =>
         arg.startsWith(

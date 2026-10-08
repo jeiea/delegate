@@ -23,7 +23,11 @@ import {
   type SharedSession,
 } from "./native_session.ts";
 import type { Exec, ExecResult } from "./process.ts";
-import type { Agent, NativeInvocation } from "./select.ts";
+import {
+  type Agent,
+  callerSessionId,
+  type NativeInvocation,
+} from "./select.ts";
 
 export type HerdrDeps = {
   exec: Exec;
@@ -1606,10 +1610,8 @@ async function resolveCallerId(
   cwd: string,
   strict = false,
 ): Promise<string | undefined> {
-  if (explicit != null && explicit !== "") return explicit;
-  if (deps.env.CODEX_THREAD_ID != null && deps.env.CODEX_THREAD_ID !== "") {
-    return deps.env.CODEX_THREAD_ID;
-  }
+  const known = explicit || callerSessionId(deps.env);
+  if (known != null) return known;
   try {
     const pane = objectValue(
       (await json(cwd, deps, ["pane", "current", "--current"])).pane,

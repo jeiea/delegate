@@ -83,6 +83,13 @@ export function selectModel(
   return models.find((model) => (modelOwner(model) ?? agent) === agent);
 }
 
+// detectCaller와 같은 이유로 코덱스를 먼저 본다.
+export function callerSessionId(
+  env: Record<string, string>,
+): string | undefined {
+  return env.CODEX_THREAD_ID || env.CLAUDE_CODE_SESSION_ID || undefined;
+}
+
 // Herdr 중첩 시 클로드 환경 변수가 자식 코덱스에 상속될 수 있어 코덱스를 먼저 본다.
 function detectCaller(env: Record<string, string>): Agent | undefined {
   if ((env.CODEX_THREAD_ID ?? "") !== "") return "codex";
