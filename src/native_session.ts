@@ -205,6 +205,11 @@ async function readSnapshot(candidate: Candidate): Promise<SharedSession> {
     const activity = publicEvents(candidate.agent, record.value, tools).at(-1);
     if (activity != null) observation.last_activity = activity;
   }
+  // 클로드는 백그라운드 작업을 기다릴 때만 turn_duration 뒤에도 턴이 열려 있다.
+  if (
+    candidate.agent === "claude" && latest?.completed === false &&
+    observation.last_activity?.kind === "request_completed"
+  ) observation.last_activity = { kind: "background_wait" };
   return {
     sessionId: parsed.sessionId,
     agent: candidate.agent,

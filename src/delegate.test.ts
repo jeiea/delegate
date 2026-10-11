@@ -4217,6 +4217,45 @@ Deno.test("클로드가 백그라운드 작업을 기다리며 응답을 멈추�
 
 // Status
 
+Deno.test("클로드가 백그라운드 작업을 기다리며 응답을 멈추면 상태 조회에서 미완료와 작업 대기를 알린다", async () => {
+  await using dir = await createTempDir({ prefix: "delegate-test-" });
+  const path = claudePath(dir.path);
+  const answer = (text: string) => [
+    { type: "assistant", message: { content: [{ type: "text", text }] } },
+    { type: "system", subtype: "turn_duration" },
+  ];
+  writeJsonl(path, [
+    ...claudeOpen(`${prefix}측정`),
+    { type: "user", toolUseResult: { backgroundTaskId: "bshell" } },
+    ...answer("기다립니다"),
+  ]);
+  const test = setup(dir.path, "");
+  const status = () => runDelegate(["status", claudeId], test.deps);
+
+  const waiting = await status();
+  assertEquals(waiting.code, 0);
+  assertStringIncludes(waiting.stdout, "request_state: incomplete");
+  assertStringIncludes(waiting.stdout, "kind: background_wait");
+
+  appendJsonl(path, [{
+    type: "attachment",
+    attachment: {
+      type: "queued_command",
+      commandMode: "task-notification",
+      prompt: "<task-notification>\n<task-id>bshell</task-id>\n" +
+        "<status>completed</status>\n</task-notification>",
+    },
+  }]);
+  const notified = await status();
+  assertStringIncludes(notified.stdout, "request_state: incomplete");
+  assertStringIncludes(notified.stdout, "kind: background_wait");
+
+  appendJsonl(path, answer("측정 결과"));
+  const completed = await status();
+  assertStringIncludes(completed.stdout, "request_state: completed");
+  assertStringIncludes(completed.stdout, "kind: request_completed");
+});
+
 Deno.test("윈도에서 홈과 사용자 프로필이 달라도 기본 프로필에 기록된 세션의 상태를 확인한다", async () => {
   await using dir = await createTempDir({ prefix: "delegate-test-" });
   const home = join(dir.path, "home");

@@ -7,6 +7,7 @@ export type PublicEvent = {
     | "request_completed"
     | "request_aborted"
     | "request_failed"
+    | "background_wait"
     | "message"
     | "tool_started"
     | "tool_completed";
