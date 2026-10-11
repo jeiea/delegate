@@ -85,6 +85,7 @@ export function parseClaudeSession(
     | undefined;
   let groupOrder = 0;
   const turns: ParsedSession["turns"] = [];
+  const background = new Set<string>();
 
   for (const record of records) {
     const event = asObject(record.value);
@@ -99,6 +100,7 @@ export function parseClaudeSession(
     }
     sessionId ??= stringValue(event.sessionId) ?? stringValue(event.session_id);
     cwd ??= stringValue(event.cwd);
+    trackBackground(event, background);
     const prompt = humanPrompt(event);
     if (prompt != null) {
       if (active != null) {
@@ -134,10 +136,12 @@ export function parseClaudeSession(
       }
       continue;
     }
+    // 백그라운드 작업이 남은 턴은 완료 알림으로 이어지는 응답까지 한 턴으로 본다.
     if (
       event.type === "system" &&
       event.subtype === "turn_duration" &&
-      active != null
+      active != null &&
+      background.size === 0
     ) {
       const final = [...active.groups.values()]
         .filter((group) => !group.toolUse && group.texts.length > 0)
@@ -157,11 +161,41 @@ export function parseClaudeSession(
     turns.push({
       prompt: active.prompt,
       completed: false,
+      ...(background.size === 0 ? {} : { background: true }),
       start: active.start,
       end: records.at(-1)?.end ?? active.start,
     });
   }
   return { sessionId, cwd, turns };
+}
+
+// 작업을 기다리는 중 받은 후속 요청도 작업이 끝나야 완료된다.
+// 시작은 도구 결과, 종료는 status가 있는 task-notification이나 TaskStop 결과로 남는다.
+// status 없는 알림은 Monitor 중간 이벤트, persistent Monitor는 세션 내내 유지된다.
+function trackBackground(
+  event: Record<string, unknown>,
+  background: Set<string>,
+): void {
+  const result = asObject(event.toolUseResult);
+  const started = stringValue(result.backgroundTaskId) ??
+    (result.persistent === false ? stringValue(result.taskId) : undefined) ??
+    (result.isAsync === true ? stringValue(result.agentId) : undefined);
+  if (started != null) background.add(started);
+  const stopped = result.task_type == null
+    ? undefined
+    : stringValue(result.task_id);
+  if (stopped != null) background.delete(stopped);
+  const attachment = asObject(event.attachment);
+  const notified = asObject(event.origin).kind === "task-notification"
+    ? messageText(asObject(event.message).content)
+    : attachment.commandMode === "task-notification"
+    ? stringValue(attachment.prompt)
+    : undefined;
+  // 재개 시 이전 프로세스의 고아 작업은 task-id 여러 개를 묶은 stopped 알림으로 온다.
+  if (notified?.includes("<status>") !== true) return;
+  for (const [, id] of notified.matchAll(/<task-id>([^<]+)<\/task-id>/g)) {
+    background.delete(id!);
+  }
 }
 
 // 작업 중 받은 프롬프트는 진행 중인 턴에 합쳐지면 queued_command 첨부로,

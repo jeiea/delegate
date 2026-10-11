@@ -1296,12 +1296,21 @@ async function waitForQuiescence(
     }
     const refreshed = await refreshNativeSession(snapshot);
     ensureTime(deadline, deps, refreshed.sessionId);
-    if (
-      ["idle", "done"].includes(checked.status) &&
+    const settled = ["idle", "done"].includes(checked.status) &&
       requireSequence(checked) === sequence &&
-      cursorEquals(cursor, refreshed.cursor) && !refreshed.cursor.partial
-    ) return { snapshot: refreshed, live: checked };
+      cursorEquals(cursor, refreshed.cursor) && !refreshed.cursor.partial;
     snapshot = refreshed;
+    if (!settled) continue;
+    if (refreshed.turns.at(-1)?.background !== true) {
+      return { snapshot: refreshed, live: checked };
+    }
+    // 입력 대기 화면이어도 백그라운드 작업 완료 알림이 다음 응답을 시작한다.
+    // working 대기는 확인과 등록 사이에 끝난 응답을 놓치므로 기록을 다시 확인한다.
+    await pause(
+      Math.min(1000, remaining(deadline, deps)),
+      deps,
+      snapshot.sessionId,
+    );
   }
 }
 

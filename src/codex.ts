@@ -15,6 +15,7 @@ export type ParsedTurn = {
   assistant?: string;
   completed: boolean;
   aborted?: boolean;
+  background?: boolean;
   start: number;
   end: number;
 };

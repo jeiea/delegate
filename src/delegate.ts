@@ -251,7 +251,7 @@ resume_option_ignored: 기존 session에 적용할 수 없는 --agent(agent)·�
 
 observation 필드
 
-request_state: 최신 요청의 completed(완료) | incomplete(미완료) | aborted(중단) | unknown(요청 없음)
+request_state: 최신 요청의 completed(완료) | incomplete(미완료, 클로드 백그라운드 작업 대기 포함) | aborted(중단) | unknown(요청 없음)
 
 last_activity_at: 완전한 기록 중 마지막 유효 시각. 없으면 생략
 

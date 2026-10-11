@@ -4093,6 +4093,128 @@ Deno.test("진행 중인 클로드 작업에 후속 요청을 보내면 진행 �
   assertEquals(logs.stdout.includes("task-notification"), false);
 });
 
+Deno.test("클로드가 백그라운드 작업을 기다리며 응답을 멈추면 패널을 닫지 않고 작업 완료 뒤 결과를 받는다", async () => {
+  await using dir = await createTempDir({ prefix: "delegate-test-" });
+  const path = claudePath(dir.path);
+  const record = (value: Record<string, unknown>) => ({
+    sessionId: claudeId,
+    cwd,
+    ...value,
+  });
+  const background = (id: string, toolUseResult: Record<string, unknown>) => [
+    record({
+      type: "assistant",
+      requestId: `req-${id}`,
+      message: {
+        content: [{ type: "tool_use", id: `call-${id}`, name: "Bash" }],
+      },
+    }),
+    record({
+      type: "user",
+      message: {
+        content: [{ type: "tool_result", tool_use_id: `call-${id}` }],
+      },
+      toolUseResult,
+    }),
+  ];
+  // 진행 중인 턴에 합쳐진 알림은 queued_command 첨부, 유휴 중 알림은 user 기록으로 남는다.
+  const notification = (
+    id: string,
+    { status, merged = false }: { status?: string; merged?: boolean } = {},
+  ) => {
+    const prompt = [
+      "<task-notification>",
+      `<task-id>${id}</task-id>`,
+      ...(status == null ? [] : [`<status>${status}</status>`]),
+      "<summary>요약</summary>",
+      "</task-notification>",
+    ].join("\n");
+    const origin = { kind: "task-notification" };
+    return record(
+      merged
+        ? {
+          type: "attachment",
+          attachment: {
+            type: "queued_command",
+            commandMode: "task-notification",
+            origin,
+            prompt,
+          },
+        }
+        : {
+          type: "user",
+          origin,
+          promptSource: "system",
+          message: { role: "user", content: prompt },
+        },
+    );
+  };
+  const answer = (id: string, text: string) => [
+    record({
+      type: "assistant",
+      requestId: `req-${id}`,
+      message: { content: [{ type: "text", text }] },
+    }),
+    record({ type: "system", subtype: "turn_duration" }),
+  ];
+  writeJsonl(path, [...claudeOpen("이전 요청"), ...answer("old", "이전 답변")]);
+  const test = setup(dir.path, "측정", [
+    herdr({ agents: [claudeLive("idle", 1)] }),
+    herdr({ agent: currentClaude("working", 2) }, {
+      onStart: () =>
+        appendJsonl(path, [
+          ...claudeOpen(`${prefix}측정`),
+          ...background("shell", { backgroundTaskId: "bshell" }),
+          ...background("monitor", { taskId: "bmon", persistent: false }),
+          ...background("watch", { taskId: "bwatch", persistent: true }),
+          ...background("agent", {
+            isAsync: true,
+            status: "async_launched",
+            agentId: "aagent",
+          }),
+          notification("aagent", { status: "completed", merged: true }),
+          ...answer("waiting", "측정이 끝나기를 기다립니다"),
+        ]),
+    }),
+    herdr({ agent: claudeLive("done", 3) }),
+    herdr({ agent: claudeLive("done", 3) }),
+    herdr({ agent: claudeLive("working", 4) }, {
+      onStart: () =>
+        appendJsonl(path, [
+          notification("bmon"),
+          ...answer("event", "중간 이벤트 확인"),
+        ]),
+    }),
+    herdr({ agent: claudeLive("done", 5) }),
+    herdr({ agent: claudeLive("done", 5) }),
+    // 재개 응답이 두 확인 사이에 끝나 working 상태를 관찰하지 못한다.
+    herdr({ agent: claudeLive("done", 7) }, {
+      onStart: () =>
+        appendJsonl(path, [
+          notification("bshell", { status: "killed" }),
+          notification("bmon", { status: "completed" }),
+          ...answer("result", "측정 결과"),
+        ]),
+    }),
+    herdr({ agent: claudeLive("done", 7) }),
+    herdr({}),
+  ], { env: { HERDR_ENV: "1" }, sleep: () => Promise.resolve() });
+
+  const prompted = await runDelegate(
+    ["prompt", claudeId, "--caller-id", "caller-1", "--timeout", "60s"],
+    test.deps,
+  );
+  assertEquals(prompted.code, 0);
+  assertStringIncludes(prompted.stdout, "측정 결과");
+  const commands = test.fake.calls.map((call) =>
+    call.args.slice(0, 2).join(" ")
+  );
+  assertEquals(commands.filter((command) => command === "pane close"), [
+    "pane close",
+  ]);
+  assertEquals(commands.at(-1), "pane close");
+});
+
 // Status
 
 Deno.test("윈도에서 홈과 사용자 프로필이 달라도 기본 프로필에 기록된 세션의 상태를 확인한다", async () => {
