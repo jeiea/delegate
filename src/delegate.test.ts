@@ -203,17 +203,20 @@ Deno.test("연결 실패 진단에서 확인된 코덱스 세션으로 요청을
   }
 });
 
-Deno.test("코덱스 연결 대기 중 시간이 만료되거나 취소되면 전달한 작업의 패널을 보존한다", async () => {
-  for (const interruption of ["timeout", "cancelled"] as const) {
+Deno.test("코덱스 연결 대기 중 시간이 만료되면 전달한 작업의 패널을 보존하고 취소되면 패널을 닫으며 닫지 못하면 패널 위치를 알린다", async () => {
+  for (const scenario of ["timeout", "cancelled", "close-refused"] as const) {
     await using dir = await createTempDir({ prefix: "delegate-test-" });
     let now = 0;
     const controller = new AbortController();
+    const interruption = scenario === "timeout" ? "timeout" : "cancelled";
     const test = setup(dir.path, "작업", [
       ...newTabAllocation(),
       herdr({ agent: unidentifiedAgent("working", 1) }),
       herdr({ agent: unidentifiedAgent("working", 1) }),
       herdr({ agent: unidentifiedAgent("working", 1) }),
-      herdr({}),
+      scenario === "close-refused"
+        ? herdrFailure("pane close refused")
+        : herdr({}),
     ], {
       env: { HERDR_ENV: "1" },
       signal: controller.signal,
@@ -240,9 +243,15 @@ Deno.test("코덱스 연결 대기 중 시간이 만료되거나 취소되면 �
       1,
     );
     assertEquals(
-      test.fake.calls.some((call) => call.args[1] === "close"),
-      false,
+      test.fake.calls.filter((call) => call.args[1] === "close").map((call) =>
+        call.args
+      ),
+      interruption === "timeout" ? [] : [["pane", "close", "pane-delegate"]],
     );
+    if (scenario === "close-refused") {
+      assertStringIncludes(result.stdout, "pane close refused");
+      assertStringIncludes(result.stdout, "pane_id: pane-delegate");
+    }
   }
 });
 
@@ -2049,7 +2058,7 @@ Deno.test("코덱스 훅 승인 때문에 요청이 진행되지 않으면 패�
   );
 });
 
-Deno.test("허더 작업이 시작되거나 완료되기를 기다리다 제한 시간이 지나거나 취소되면 확인된 세션을 알린다", async () => {
+Deno.test("허더 작업이 시작되거나 완료되기를 기다리다 제한 시간이 지나거나 취소되면 확인된 세션을 알리고 취소한 위임은 옮겨진 패널까지 닫아 멈춘다", async () => {
   await using dir = await createTempDir({ prefix: "delegate-test-" });
   const path = codexPath(dir.path);
   writeJsonl(path, [codexMeta(), ...codexTurn("old", "이전", "완료")]);
@@ -2144,6 +2153,14 @@ Deno.test("허더 작업이 시작되거나 완료되기를 기다리다 제한 
       waitForAbort: true,
       onStart: () => newController.abort(),
     },
+    herdrError("pane_not_found", "pane pane-new not found"),
+    herdr({
+      agents: [{
+        ...liveAgent("working", 3, createdId),
+        pane_id: "pane-moved",
+      }],
+    }),
+    herdr({}),
   ], {
     env: { HERDR_ENV: "1" },
     signal: newController.signal,
@@ -2158,9 +2175,14 @@ Deno.test("허더 작업이 시작되거나 완료되기를 기다리다 제한 
   assertEquals(createdInterrupted.code, 130);
   assertStringIncludes(createdInterrupted.stdout, "code: cancelled");
   assertStringIncludes(createdInterrupted.stdout, `session_id: ${createdId}`);
+  assertEquals(created.fake.calls.slice(-3).map((call) => call.args), [
+    ["pane", "close", "pane-new"],
+    ["agent", "list"],
+    ["pane", "close", "pane-moved"],
+  ]);
 });
 
-Deno.test("허더 작업의 제한 시간이 지나면 시작에 실패한 패널을 정리하고 요청이 전달됐을 수 있는 패널은 보존한다", async () => {
+Deno.test("허더 작업의 제한 시간이 지나면 시작에 실패한 패널을 정리하고 요청이 전달됐을 수 있는 패널은 보존하며 취소되면 닫는다", async () => {
   for (const stage of ["start", "prompt"] as const) {
     await using dir = await createTempDir({ prefix: "delegate-test-" });
     const controller = new AbortController();
@@ -2236,7 +2258,7 @@ Deno.test("허더 작업의 제한 시간이 지나면 시작에 실패한 패�
     cancelled.fake.calls.some((call) =>
       call.args.join(" ") === "pane close pane-delegate"
     ),
-    false,
+    true,
   );
 
   for (
@@ -2393,7 +2415,7 @@ Deno.test("허더 작업의 제한 시간이 지나면 시작에 실패한 패�
   );
 });
 
-Deno.test("사용자 취소와 제한 시간 초과가 겹치면 취소 결과와 확인된 세션을 알린다", async () => {
+Deno.test("사용자 취소와 제한 시간 초과가 겹치면 취소 결과와 확인된 세션을 알리고 패널을 닫는다", async () => {
   for (const simultaneous of [false, true]) {
     await using dir = await createTempDir({ prefix: "delegate-test-" });
     const path = codexPath(dir.path);
@@ -2444,11 +2466,16 @@ Deno.test("사용자 취소와 제한 시간 초과가 겹치면 취소 결과�
       `code: ${simultaneous ? "cancelled" : "timeout"}`,
     );
     assertStringIncludes(result.stdout, `session_id: ${codexId}`);
-    assertEquals(test.fake.calls.length, 6);
+    assertEquals(
+      test.fake.calls.filter((call) => call.args[1] === "close").map((call) =>
+        call.args
+      ),
+      simultaneous ? [["pane", "close", "pane-delegate"]] : [],
+    );
   }
 });
 
-Deno.test("작업 완료 후 이름 변경이나 정리 중 취소되면 중단 오류를 알린다", async () => {
+Deno.test("작업 완료 후 이름 변경이나 정리 중 취소되면 중단 오류를 알리고 패널을 닫는다", async () => {
   for (
     const scenario of [
       { stage: "rename-command", interruption: "cancelled" },
@@ -2536,11 +2563,20 @@ Deno.test("작업 완료 후 이름 변경이나 정리 중 취소되면 중단 
       scenario.stage,
     );
     assertEquals(
+      test.fake.calls.filter((call) =>
+        call.args.join(" ") === "pane close pane-delegate"
+      ).length,
+      { "rename-command": 1, "rename-pause": 0, "cleanup-close": 2 }[
+        scenario.stage
+      ],
+      scenario.stage,
+    );
+    assertEquals(
       test.fake.calls.length,
       {
-        "rename-command": 9,
+        "rename-command": 10,
         "rename-pause": 9,
-        "cleanup-close": 9,
+        "cleanup-close": 10,
       }[scenario.stage],
       scenario.stage,
     );
@@ -4936,6 +4972,9 @@ Deno.test("패널 부재 메시지가 정확히 일치할 때만 세션을 한 �
             ["pane", "close", "pane-delegate"],
             ...(requery ? [["agent", "list"]] : []),
             ...(retry ? [["pane", "close", "pane-moved"]] : []),
+            ...(command === "prompt" && scenario === "cancelled"
+              ? [["pane", "close", "pane-delegate"]]
+              : []),
           ],
         );
       });

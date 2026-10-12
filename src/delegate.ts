@@ -214,6 +214,8 @@ agent_blocked: 사용자 입력 대기 또는 시작 직후 종료. 확인된 er
 
 - ${sendKeysGuide("<PANE_ID>")}; <PANE_ID>는 error.pane.pane_id
 
+cancelled: 호출자 중단(SIGINT·SIGTERM). 확인된 관리 pane을 닫아 작업도 중단. 확인된 session_id로 재개 가능
+
 invalid_native_session: pane이 확인되면 error.pane.pane_id와 현재 화면을 반환. 차단 해소 뒤에도 native 기록 파일이 없을 수 있으므로 pane을 확인하고 필요 시 정리
 
 live_option_conflict: 실행 중 session에 --permission·--effort·--add-dir 지정
@@ -286,7 +288,7 @@ last_activity_at과 last_activity는 서로 다른 기록을 가리킬 수 있�
       {
         brief: message`실행 중 session 완료 대기`,
         description:
-          message`호출 연결 유실 뒤 결과 회수용. Herdr 창이 없으면 원본 기록의 최신 요청 종료를 대기. 최신 요청이 이미 완료됐고 부분 기록이 없으면 즉시 결과 반환. 진행·부분 기록 앞의 이전 완료 결과는 반환하지 않으며, 종료 기록이 없으면 제한 시간까지 대기. 생존은 unknown 유지. 대기 시작 뒤 추가된 사람 prompt는 intervening_prompts, 마지막 result는 마크다운 본문으로 반환. Herdr 창이 있으면 성공 후 관리 pane 자동 정리. 오류 의미는 prompt와 동일`,
+          message`호출 연결 유실 뒤 결과 회수용. Herdr 창이 없으면 원본 기록의 최신 요청 종료를 대기. 최신 요청이 이미 완료됐고 부분 기록이 없으면 즉시 결과 반환. 진행·부분 기록 앞의 이전 완료 결과는 반환하지 않으며, 종료 기록이 없으면 제한 시간까지 대기. 생존은 unknown 유지. 대기 시작 뒤 추가된 사람 prompt는 intervening_prompts, 마지막 result는 마크다운 본문으로 반환. Herdr 창이 있으면 성공 후 관리 pane 자동 정리. 오류 의미는 prompt와 동일하나 cancelled는 pane 유지`,
       },
     ),
     (value) => ({ kind: "wait" as const, ...value }),
@@ -808,7 +810,11 @@ async function writeText(
 async function main(): Promise<void> {
   const controller = new AbortController();
   const interrupt = () => controller.abort();
-  Deno.addSignalListener("SIGINT", interrupt);
+  // 호스트의 백그라운드 작업 중지는 SIGTERM 뒤 짧은 유예를 두고 강제 종료한다.
+  const signals = Deno.build.os === "windows"
+    ? ["SIGINT"] as const
+    : ["SIGINT", "SIGTERM"] as const;
+  for (const signal of signals) Deno.addSignalListener(signal, interrupt);
   try {
     const result = await runDelegate(Deno.args, {
       exec: denoExec,
@@ -825,7 +831,7 @@ async function main(): Promise<void> {
     await writeText(Deno.stderr, result.stderr);
     Deno.exit(result.code);
   } finally {
-    Deno.removeSignalListener("SIGINT", interrupt);
+    for (const signal of signals) Deno.removeSignalListener(signal, interrupt);
   }
 }
 

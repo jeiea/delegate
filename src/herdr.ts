@@ -136,8 +136,8 @@ export async function promptHerdr(
     ),
     expected?.sessionId,
   );
+  let snapshot: SharedSession | undefined;
   try {
-    let snapshot: SharedSession;
     let boundaryCursor: NativeCursor | undefined;
     if (live == null) {
       if (callerId == null) {
@@ -206,7 +206,11 @@ export async function promptHerdr(
             const preserved = copyDelegateError(normalizeError(error), {
               retry: startRetry,
             });
-            if (!retainPane && preserved.code !== "agent_blocked") {
+            // 호출자 중단은 바깥 catch에서 확인된 pane을 닫는다.
+            if (
+              !retainPane &&
+              !["agent_blocked", "cancelled"].includes(preserved.code)
+            ) {
               await recoverOwnedPane(ownership, ownedCwd, deps).catch(() => {});
             }
             throw preserved;
@@ -335,9 +339,41 @@ export async function promptHerdr(
       sessionId: normalized.sessionId ?? confirmedSessionId,
       retry: normalized.retry ?? retry,
     });
-    throw diagnostic == null
-      ? preserved
+    if (diagnostic == null) throw preserved;
+    throw preserved.code === "cancelled"
+      ? await closeCancelledPane(preserved, diagnostic, snapshot, deps)
       : await diagnosePane(preserved, diagnostic, deps);
+  }
+}
+
+// 호출자 중단은 위임 작업도 멈춘다. 대화는 native 기록으로 재개한다.
+async function closeCancelledPane(
+  error: DelegateError,
+  target: PaneTarget,
+  snapshot: SharedSession | undefined,
+  deps: HerdrDeps,
+): Promise<DelegateError> {
+  const recoveryDeps = { ...deps, signal: AbortSignal.timeout(recoveryMs) };
+  try {
+    if (snapshot == null) {
+      await closePane(target.paneId, target.cwd, recoveryDeps);
+    } else {
+      // 이동한 pane은 session으로 다시 찾는다.
+      await closeSessionPane(target.paneId, snapshot, {
+        deadline: recoveryDeps.now() + recoveryMs,
+        deps: recoveryDeps,
+      });
+    }
+    return error;
+  } catch (closeError) {
+    return new DelegateError(
+      error.code,
+      `${error.message}; pane 정리 실패: ${normalizeError(closeError).message}`,
+      { pane_id: target.paneId },
+      error.sessionId,
+      error.retry,
+      error.screen,
+    );
   }
 }
 
