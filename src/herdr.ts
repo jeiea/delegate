@@ -10,6 +10,7 @@ import {
   copyDelegateError,
   DelegateError,
   normalizeError,
+  renderSessionHead,
 } from "./document.ts";
 import {
   cursorEquals,
@@ -35,6 +36,7 @@ export type HerdrDeps = {
   signal: AbortSignal;
   now(): number;
   sleep(ms: number, signal: AbortSignal): Promise<void>;
+  stdout?: (text: string) => void | Promise<void>;
 };
 
 type PromptExecutionDeps = HerdrDeps & {
@@ -260,6 +262,9 @@ export async function promptHerdr(
       boundaryCursor = submitted.boundaryCursor;
     }
     confirmedSessionId = snapshot.sessionId;
+    if (expected == null) {
+      await executionDeps.stdout?.(renderSessionHead(snapshot.sessionId));
+    }
     const deterministic = deterministicName(snapshot.sessionId);
     if (live.name !== deterministic) {
       try {

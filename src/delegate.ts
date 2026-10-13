@@ -25,7 +25,7 @@ import {
   statusDirect,
   waitDirect,
 } from "./direct.ts";
-import { publicEvents } from "./activity.ts";
+import { type PublicEvent, publicEvents } from "./activity.ts";
 import {
   type DelegateDocument,
   DelegateError,
@@ -34,6 +34,7 @@ import {
   type NativeSessionId,
   normalizeError,
   renderDocument,
+  renderSessionHead,
 } from "./document.ts";
 import {
   closeHerdr,
@@ -74,6 +75,7 @@ export type Deps = {
   now?: () => number;
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
   progress?: (text: string) => void | Promise<void>;
+  stdout?: (text: string) => void | Promise<void>;
 };
 
 type PromptOptions = {
@@ -209,6 +211,8 @@ function parser() {
         description:
           message`prompt 완료까지 대기한 뒤 이번 turn의 result를 마크다운 본문으로 반환.
 
+새 session은 ID가 확정되면 프런트매터 시작과 session_id 줄을 먼저 출력하고 완료 시 나머지를 이어 출력. 백그라운드 실행 중 출력에서 session_id를 읽어 후속 명령에 사용 가능.
+
 직접 실행은 실제 이벤트 발생 시 표준 오류 JSONL로 transport, agent, 확인된 session_id, kind, 선택적 tool 전달. 도구 인자·결과, 응답 본문·비공개 사고 과정 제외. 주기 알림 없음.
 
 Herdr는 성공하면 관리 pane을 자동 정리하며 마지막 pane 뒤 빈 탭은 Herdr가 제거한다. 대화는 native 기록에 남아 같은 SESSION_ID로 재개 가능. Herdr 작업 중 사람이 직접 prompt를 넣어도 되며 그 turn까지 끝난 뒤 반환하고 추가 prompt는 intervening_prompts에 기록. pane 준비 경합으로 시작이 실패하면 한 번 자동 재시도하고 retry 필드에 기록. retry.result는 시작 회복 여부일 뿐 최종 성공과 무관.`,
@@ -334,7 +338,29 @@ last_activity_at과 last_activity는 서로 다른 기록을 가리킬 수 있�
   return or(prompt, status, wait, logs, close);
 }
 
+/** 반환 stdout은 deps.stdout으로 먼저 쓴 부분을 뺀 나머지 */
 export async function runDelegate(
+  args: string[],
+  deps: Deps,
+): Promise<{ stdout: string; stderr: string; code: number }> {
+  let streamed = "";
+  const stdout = deps.stdout;
+  const result = await runCommand(args, {
+    ...deps,
+    stdout: stdout && (async (text) => {
+      await stdout(text);
+      streamed += text;
+    }),
+  });
+  if (!result.stdout.startsWith(streamed)) {
+    throw new Error(
+      `먼저 출력한 문서 앞부분이 최종 문서와 다릅니다: ${streamed}`,
+    );
+  }
+  return { ...result, stdout: result.stdout.slice(streamed.length) };
+}
+
+async function runCommand(
   args: string[],
   deps: Deps,
 ): Promise<{ stdout: string; stderr: string; code: number }> {
@@ -597,6 +623,22 @@ async function executeDirect(
   let sessionId = expectedSessionId;
   let pending = "";
   const tools = new Map<string, string>();
+  const reportEvent = async (event: PublicEvent) => {
+    if (event.session_id != null) {
+      if (!sessionIdPattern.test(event.session_id)) return;
+      const isNew = sessionId == null;
+      sessionId = event.session_id;
+      if (isNew) await deps.stdout?.(renderSessionHead(sessionId));
+    }
+    await deps.progress?.(`${
+      JSON.stringify({
+        transport: "direct",
+        agent: invocation.agent,
+        session_id: sessionId,
+        ...event,
+      })
+    }\n`);
+  };
   const onStdout = async (chunk: string) => {
     pending += chunk;
     const lines = pending.split("\n");
@@ -609,18 +651,7 @@ async function executeDirect(
         continue;
       }
       for (const event of publicEvents(invocation.agent, value, tools)) {
-        if (event.session_id != null) {
-          if (!sessionIdPattern.test(event.session_id)) continue;
-          sessionId = event.session_id;
-        }
-        await deps.progress?.(`${
-          JSON.stringify({
-            transport: "direct",
-            agent: invocation.agent,
-            session_id: sessionId,
-            ...event,
-          })
-        }\n`);
+        await reportEvent(event);
       }
     }
   };
@@ -735,6 +766,7 @@ function runtimeDeps(deps: Deps): HerdrDeps {
     signal: deps.signal,
     now: deps.now ?? (() => performance.now()),
     sleep: deps.sleep ?? abortableSleep,
+    stdout: deps.stdout,
   };
 }
 
@@ -830,6 +862,7 @@ async function main(): Promise<void> {
       cwd: Deno.cwd(),
       signal: controller.signal,
       progress: (text) => writeText(Deno.stderr, text),
+      stdout: (text) => writeText(Deno.stdout, text),
     });
     await writeText(Deno.stdout, result.stdout);
     await writeText(Deno.stderr, result.stderr);

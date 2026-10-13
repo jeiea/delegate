@@ -129,6 +129,11 @@ export function exitCode(code: PublicErrorCode): number {
   return 5;
 }
 
+// session_id는 항상 프런트매터 첫 키라 완료 전에 먼저 써도 최종 문서와 같다.
+export function renderSessionHead(sessionId: string): string {
+  return `---\n${stringify({ session_id: sessionId }, { lineWidth: -1 })}`;
+}
+
 export function renderDocument(document: DelegateDocument): string {
   const { result, screen, ...metadata } = document;
   const frontmatter = `---\n${stringify(metadata, { lineWidth: -1 })}---\n`;

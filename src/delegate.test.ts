@@ -14,7 +14,7 @@ const prefix = "delegate 스킬 등 다른 에이전트 재위임 금지.\n\n";
 
 // Herdr codex prompt
 
-Deno.test("코덱스 연결이 늦어져도 파일 요청을 지정한 추론 강도로 마치고 대화 기록을 남긴 뒤 패널을 닫는다", async () => {
+Deno.test("코덱스 연결이 늦어져도 확정된 세션을 먼저 알리고 파일 요청을 지정한 추론 강도로 마친 뒤 대화 기록을 남기고 패널을 닫는다", async () => {
   await using dir = await createTempDir({ prefix: "delegate-test-" });
   const promptPath = join(dir.path, "prompt.md");
   const nativePath = codexPath(dir.path);
@@ -22,6 +22,7 @@ Deno.test("코덱스 연결이 늦어져도 파일 요청을 지정한 추론 �
   const sentPrompt = `${prefix}첫 문단입니다.\n\n둘째 문단입니다.`;
   Deno.writeTextFileSync(promptPath, `\uFEFF${filePrompt}`);
   let now = 0;
+  const streamed: string[] = [];
   const test = setup(dir.path, "stdin은 사용하지 않습니다", [
     herdr({ pane: { workspace_id: "ws-1", tab_id: "tab-current" } }),
     herdr({ tabs: [] }),
@@ -50,7 +51,10 @@ Deno.test("코덱스 연결이 늦어져도 파일 요청을 지정한 추론 �
     herdr({ agent: unidentifiedAgent("working", 1) }),
     herdr({ agent: currentAgent("working", 1) }),
     herdr({}),
-    herdr({ agent: liveAgent("done", 2) }),
+    herdr({ agent: liveAgent("done", 2) }, {
+      onStart: () =>
+        assertEquals(streamed.join(""), `---\nsession_id: ${codexId}\n`),
+    }),
     herdr({ agent: liveAgent("done", 2) }),
     herdr({}),
   ], {
@@ -74,11 +78,12 @@ Deno.test("코덱스 연결이 늦어져도 파일 요청을 지정한 추론 �
     "high",
     "--timeout",
     "1m",
-  ], test.deps);
+  ], { ...test.deps, stdout: (text) => void streamed.push(text) });
 
   assertEquals(result.code, 0);
   assertEquals(now >= 6_000, true);
-  assertStringIncludes(result.stdout, `session_id: ${codexId}`);
+  assertEquals(streamed.join(""), `---\nsession_id: ${codexId}\n`);
+  assertEquals(result.stdout.startsWith("agent: codex\n"), true);
   assertEquals(result.stdout.includes("intervening_prompts:"), false);
   assertStringIncludes(result.stdout, "\n\n완료\n");
   assertEquals(
@@ -2157,16 +2162,18 @@ Deno.test("허더 작업이 시작되거나 완료되기를 기다리다 제한 
     env: { HERDR_ENV: "1" },
     signal: newController.signal,
   });
+  const createdStreamed: string[] = [];
   const createdInterrupted = await runDelegate([
     "prompt",
     "--agent",
     "codex",
     "--caller-id",
     "caller-new",
-  ], created.deps);
+  ], { ...created.deps, stdout: (text) => void createdStreamed.push(text) });
   assertEquals(createdInterrupted.code, 130);
+  assertEquals(createdStreamed.join(""), `---\nsession_id: ${createdId}\n`);
   assertStringIncludes(createdInterrupted.stdout, "code: cancelled");
-  assertStringIncludes(createdInterrupted.stdout, `session_id: ${createdId}`);
+  assertEquals(createdInterrupted.stdout.includes("session_id:"), false);
   assertEquals(created.fake.calls.slice(-3).map((call) => call.args), [
     ["pane", "close", "pane-new"],
     ["agent", "list"],
@@ -3337,13 +3344,14 @@ Deno.test("클로드에 요청한 뒤 차단되면 기록이 없어도 패널 �
 
 // Direct claude / codex prompt
 
-Deno.test("클로드와 코덱스에 직접 요청하면 공개 진행 상황과 최종 답변을 받고 같은 작업 공간에서 재개한다", async () => {
+Deno.test("클로드와 코덱스에 직접 요청하면 새 세션을 먼저 알리고 공개 진행 상황과 최종 답변을 받은 뒤 같은 작업 공간에서 재개한다", async () => {
   await using dir = await createTempDir({ prefix: "delegate-test-" });
   for (const agent of ["claude", "codex"] as const) {
     const id = agent === "codex" ? codexId : claudeId;
     const sessionCwd = join(dir.path, `${agent}-session-workspace`);
     Deno.mkdirSync(sessionCwd);
     const progress: string[] = [];
+    const streamed: string[] = [];
     const events = agent === "codex"
       ? [
         { type: "thread.started", thread_id: codexId },
@@ -3408,6 +3416,7 @@ Deno.test("클로드와 코덱스에 직접 요청하면 공개 진행 상황과
       cmd: agent,
       stdoutChunks: [output.slice(0, 17), output.slice(17)],
       afterOutput: () => {
+        assertEquals(streamed.join(""), `---\nsession_id: ${id}\n`);
         assertStringIncludes(progress.join(""), id);
         assertStringIncludes(progress.join(""), "direct");
         assertStringIncludes(progress.join(""), "tool_started");
@@ -3450,6 +3459,7 @@ Deno.test("클로드와 코덱스에 직접 요청하면 공개 진행 상황과
       progress: (text) => {
         progress.push(text);
       },
+      stdout: (text) => void streamed.push(text),
     });
     assertEquals(result.code, 0);
     assertEquals(result.stdout.includes("run_id:"), false);
@@ -3481,7 +3491,7 @@ Deno.test("클로드와 코덱스에 직접 요청하면 공개 진행 상황과
       false,
     );
     assertEquals(
-      result.stdout,
+      streamed.join("") + result.stdout,
       `---\nsession_id: ${id}\nagent: ${agent}\nactivity: quiescent\n---\n\n# 완료\n\n본문\n`,
     );
     for (
@@ -3510,11 +3520,13 @@ Deno.test("클로드와 코덱스에 직접 요청하면 공개 진행 상황과
           result: "재개 결과",
         }),
     }]);
+    const resumedStreamed: string[] = [];
     const continued = await runDelegate(
       ["prompt", id, "--transport", "direct"],
-      resumed.deps,
+      { ...resumed.deps, stdout: (text) => void resumedStreamed.push(text) },
     );
     assertEquals(continued.code, 0);
+    assertEquals(resumedStreamed, []);
     assertStringIncludes(continued.stdout, `session_id: ${id}`);
     assertStringIncludes(continued.stdout, "\n\n재개 결과\n");
     assertEquals(resumed.fake.calls[0]?.cwd, sessionCwd);
@@ -3839,7 +3851,7 @@ Deno.test({
   },
 });
 
-Deno.test("직접 실행이 시작되지 않거나 제한 시간 초과·취소로 끝나면 실패 원인과 확인된 세션을 알린다", async () => {
+Deno.test("직접 실행이 시작되지 않거나 제한 시간 초과·취소·출력 실패로 끝나면 실패 원인과 확인된 세션을 알린다", async () => {
   await using dir = await createTempDir({ prefix: "delegate-test-" });
   const failed = setup(dir.path, "작업", [{
     cmd: "codex",
@@ -3862,6 +3874,7 @@ Deno.test("직접 실행이 시작되지 않거나 제한 시간 초과·취소�
     waitForAbort: true,
     stdout: `{"type":"thread.started","thread_id":"${codexId}"}\n`,
   }]);
+  const streamed: string[] = [];
   const timedOut = await runDelegate([
     "prompt",
     "--transport",
@@ -3870,10 +3883,11 @@ Deno.test("직접 실행이 시작되지 않거나 제한 시간 초과·취소�
     "codex",
     "--timeout",
     "1s",
-  ], timeout.deps);
+  ], { ...timeout.deps, stdout: (text) => void streamed.push(text) });
   assertEquals(timedOut.code, 6);
+  assertEquals(streamed.join(""), `---\nsession_id: ${codexId}\n`);
   assertStringIncludes(timedOut.stdout, "code: timeout");
-  assertStringIncludes(timedOut.stdout, codexId);
+  assertEquals(timedOut.stdout.includes("session_id:"), false);
 
   const controller = new AbortController();
   const cancelled = setup(dir.path, "작업", [{
@@ -3892,6 +3906,26 @@ Deno.test("직접 실행이 시작되지 않거나 제한 시간 초과·취소�
   assertEquals(interrupted.code, 130);
   assertStringIncludes(interrupted.stdout, "code: cancelled");
   assertStringIncludes(interrupted.stdout, codexId);
+
+  const broken = setup(dir.path, "작업", [{
+    cmd: "codex",
+    stdout: `{"type":"thread.started","thread_id":"${codexId}"}\n`,
+  }]);
+  const unwritten = await runDelegate([
+    "prompt",
+    "--transport",
+    "direct",
+    "--agent",
+    "codex",
+  ], {
+    ...broken.deps,
+    stdout: () => {
+      throw new Deno.errors.BrokenPipe("stdout closed");
+    },
+  });
+  assertEquals(unwritten.code, 5);
+  assertStringIncludes(unwritten.stdout, `session_id: ${codexId}`);
+  assertStringIncludes(unwritten.stdout, "stdout closed");
 });
 
 Deno.test("직접 요청의 비정상 종료와 불완전 출력도 먼저 관찰한 세션과 실패 상태를 보존한다", async () => {
