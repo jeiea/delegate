@@ -945,17 +945,7 @@ Deno.test("사용자 응답을 기다리는 작업은 즉시 차단을 알리고
     false,
   );
 
-  appendJsonl(path, [{
-    type: "response_item",
-    payload: {
-      type: "message",
-      role: "assistant",
-      content: [{ type: "output_text", text: "응답 후 완료" }],
-    },
-  }, {
-    type: "event_msg",
-    payload: { type: "task_complete", turn_id: "t" },
-  }]);
+  appendJsonl(path, codexCompletion("t", "응답 후 완료"));
   const waitStart = test.fake.calls.length;
   const waited = await runDelegate(["wait", codexId], test.deps);
   assertEquals(waited.code, 0);
@@ -4251,6 +4241,44 @@ Deno.test("클로드가 백그라운드 작업을 기다리며 응답을 멈추�
   assertEquals(commands.at(-1), "pane close");
 });
 
+Deno.test("코덱스 갈래 대화가 끝나 화면이 쉬어도 위임 요청이 끝나기 전에는 패널을 닫지 않고 완료 뒤 결과를 받는다", async () => {
+  await using dir = await createTempDir({ prefix: "delegate-test-" });
+  const path = codexPath(dir.path);
+  writeJsonl(path, [
+    codexMeta(),
+    ...codexTurn("turn-old", "이전 요청", "이전"),
+  ]);
+  const test = setup(dir.path, "수집", [
+    herdr({ agents: [liveAgent("idle", 1)] }),
+    herdr({ agent: currentAgent("working", 2) }, {
+      onStart: () => appendJsonl(path, codexTurn("turn-main", `${prefix}수집`)),
+    }),
+    // herdr는 화면으로 상태를 판정해 /side 답변 종료를 쉬는 상태로 보고한다.
+    herdr({ agent: liveAgent("done", 3) }),
+    herdr({ agent: liveAgent("done", 3) }),
+    herdr({ agent: liveAgent("done", 4) }, {
+      onStart: () =>
+        appendJsonl(path, codexCompletion("turn-main", "수집 결과")),
+    }),
+    herdr({ agent: liveAgent("done", 4) }),
+    herdr({}),
+  ], { env: { HERDR_ENV: "1" }, sleep: () => Promise.resolve() });
+
+  const prompted = await runDelegate(
+    ["prompt", codexId, "--caller-id", "caller-1", "--timeout", "60s"],
+    test.deps,
+  );
+  assertEquals(prompted.code, 0);
+  assertStringIncludes(prompted.stdout, "수집 결과");
+  const commands = test.fake.calls.map((call) =>
+    call.args.slice(0, 2).join(" ")
+  );
+  assertEquals(commands.filter((command) => command === "pane close"), [
+    "pane close",
+  ]);
+  assertEquals(commands.at(-1), "pane close");
+});
+
 // Status
 
 Deno.test("클로드가 백그라운드 작업을 기다리며 응답을 멈추면 상태 조회에서 미완료와 작업 대기를 알린다", async () => {
@@ -5248,6 +5276,21 @@ function codexTurn(
       }]
       : []),
   ];
+}
+
+// 진행 중이던 턴이 최종 답변과 함께 끝난다.
+function codexCompletion(id: string, result: string) {
+  return [{
+    type: "response_item",
+    payload: {
+      type: "message",
+      role: "assistant",
+      content: [{ type: "output_text", text: result }],
+    },
+  }, {
+    type: "event_msg",
+    payload: { type: "task_complete", turn_id: id },
+  }];
 }
 
 function directReply(agent: "codex" | "claude"): FakeResponse {

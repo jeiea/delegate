@@ -1337,10 +1337,9 @@ async function waitForQuiescence(
       cursorEquals(cursor, refreshed.cursor) && !refreshed.cursor.partial;
     snapshot = refreshed;
     if (!settled) continue;
-    if (refreshed.turns.at(-1)?.background !== true) {
+    if (!turnPending(refreshed)) {
       return { snapshot: refreshed, live: checked };
     }
-    // 입력 대기 화면이어도 백그라운드 작업 완료 알림이 다음 응답을 시작한다.
     // working 대기는 확인과 등록 사이에 끝난 응답을 놓치므로 기록을 다시 확인한다.
     await pause(
       Math.min(1000, remaining(deadline, deps)),
@@ -1348,6 +1347,17 @@ async function waitForQuiescence(
       snapshot.sessionId,
     );
   }
+}
+
+// 입력 대기 화면이어도 끝나지 않은 요청이 있다.
+// 클로드는 백그라운드 작업 완료 알림이 다음 응답을 시작한다. 사용자 중단은
+// 종료 기록을 남기지 않아 백그라운드 작업만 기다린다.
+// 코덱스는 /side 갈래 대화가 끝나면 본 요청이 진행 중이어도 쉬는 화면이 된다.
+function turnPending(snapshot: SharedSession): boolean {
+  const turn = snapshot.turns.at(-1);
+  if (turn == null) return false;
+  if (snapshot.agent === "claude") return turn.background === true;
+  return !turn.completed && !turn.aborted;
 }
 
 async function findLiveAgent(
