@@ -104,17 +104,24 @@ function modelOwner(model: string): Agent | undefined {
 }
 
 export function parseDuration(input: string): number {
-  const match = /^(\d+)(ms|s|m|h)$/.exec(input);
+  const match = /^(\d+)(s|m|h)$/.exec(input);
   if (match == null) throw new RangeError(`잘못된 duration: ${input}`);
   const value = Number(match[1]);
-  const multiplier = { ms: 1, s: 1_000, m: 60_000, h: 3_600_000 }[
-    match[2] as "ms" | "s" | "m" | "h"
-  ];
+  const multiplier = durationUnits[match[2] as keyof typeof durationUnits];
   if (!Number.isSafeInteger(value) || value <= 0) {
     throw new RangeError(`잘못된 duration: ${input}`);
   }
   return value * multiplier;
 }
+
+export function formatDuration(ms: number): string {
+  const [unit, size] = Object.entries(durationUnits).find(([, size]) =>
+    ms % size === 0
+  )!;
+  return `${ms / size}${unit}`;
+}
+
+const durationUnits = { h: 3_600_000, m: 60_000, s: 1_000 };
 
 export function selectTransport(
   requested: "auto" | Transport,

@@ -55,6 +55,7 @@ import {
   type AgentOption,
   callerSessionId,
   type Effort,
+  formatDuration,
   type NativeInvocation,
   parseDuration,
   type Permission,
@@ -122,10 +123,13 @@ const duration: ValueParser<"sync", number> = {
     try {
       return { success: true, value: parseDuration(input) };
     } catch {
-      return { success: false, error: message`잘못된 duration: ${input}` };
+      return {
+        success: false,
+        error: message`잘못된 duration: ${input}. 단위 필수(s·m·h), 예: 50m`,
+      };
     }
   },
-  format: (value) => `${value}ms`,
+  format: formatDuration,
 };
 
 function parser() {

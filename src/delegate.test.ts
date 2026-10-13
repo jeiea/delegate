@@ -1599,7 +1599,7 @@ Deno.test("차단 화면 조회가 멈춰도 기한 안에 원래 오류와 확�
         "--caller-id",
         "caller",
         "--timeout",
-        "500ms",
+        "1s",
       ], test.deps);
       assertEquals(callerAborted, false, stalled);
       assertEquals(result.code, 4, stalled);
@@ -2086,6 +2086,8 @@ Deno.test("허더 작업이 시작되거나 완료되기를 기다리다 제한 
       now += ms;
       sleeps.push(ms);
       if (!delayedPromptWritten) {
+        // 늦은 prompt 기록에 걸린 시간. 마지막 대기가 남은 시간으로 줄어드는지 확인
+        now += 400;
         appendJsonl(
           path,
           codexTurn("late", `${prefix}늦은 prompt`, "늦은 결과"),
@@ -2101,12 +2103,12 @@ Deno.test("허더 작업이 시작되거나 완료되기를 기다리다 제한 
     "--caller-id",
     "caller",
     "--timeout",
-    "600ms",
+    "1s",
   ], timed.deps);
   assertEquals(timeout.code, 6);
   assertStringIncludes(timeout.stdout, "code: timeout");
   assertStringIncludes(timeout.stdout, `session_id: ${codexId}`);
-  assertEquals(now, 600);
+  assertEquals(now, 1000);
   assertEquals(sleeps, [500, 100]);
 
   const controller = new AbortController();
@@ -2198,7 +2200,7 @@ Deno.test("허더 작업의 제한 시간이 지나면 시작에 실패한 패�
       env: { HERDR_ENV: "1" },
       signal: controller.signal,
     });
-    const safety = setTimeout(() => controller.abort(), 150);
+    const safety = setTimeout(() => controller.abort(), 2_000);
 
     const result = await runDelegate([
       "prompt",
@@ -2207,7 +2209,7 @@ Deno.test("허더 작업의 제한 시간이 지나면 시작에 실패한 패�
       "--caller-id",
       "caller",
       "--timeout",
-      "20ms",
+      "1s",
     ], test.deps);
     clearTimeout(safety);
 
@@ -2216,7 +2218,7 @@ Deno.test("허더 작업의 제한 시간이 지나면 시작에 실패한 패�
     const gated = test.fake.calls.find((call) => call.args[1] === stage);
     const timeout = Number(gated?.args[gated.args.indexOf("--timeout") + 1]);
     assertEquals(
-      Number.isInteger(timeout) && timeout > 0 && timeout <= 20,
+      Number.isInteger(timeout) && timeout > 0 && timeout <= 1_000,
       true,
     );
     assertEquals(
@@ -2425,7 +2427,7 @@ Deno.test("사용자 취소와 제한 시간 초과가 겹치면 취소 결과�
         cmd: "herdr",
         waitForAbort: true,
         onStart: async () => {
-          await new Promise((resolve) => setTimeout(resolve, 30));
+          await new Promise((resolve) => setTimeout(resolve, 1_010));
           controller.abort();
         },
       }
@@ -2447,7 +2449,7 @@ Deno.test("사용자 취소와 제한 시간 초과가 겹치면 취소 결과�
     });
     const safety = simultaneous
       ? undefined
-      : setTimeout(() => controller.abort(), 150);
+      : setTimeout(() => controller.abort(), 2_000);
 
     const result = await runDelegate([
       "prompt",
@@ -2456,7 +2458,7 @@ Deno.test("사용자 취소와 제한 시간 초과가 겹치면 취소 결과�
       "--caller-id",
       "caller",
       "--timeout",
-      "20ms",
+      "1s",
     ], test.deps);
     if (safety != null) clearTimeout(safety);
 
@@ -2521,7 +2523,7 @@ Deno.test("작업 완료 후 이름 변경이나 정리 중 취소되면 중단 
           return Promise.resolve();
         }
         return new Promise<void>((resolve, reject) => {
-          const timer = setTimeout(resolve, 100);
+          const timer = setTimeout(resolve, 1_000);
           signal.addEventListener("abort", () => {
             clearTimeout(timer);
             reject(new DOMException("Aborted", "AbortError"));
@@ -2538,9 +2540,7 @@ Deno.test("작업 완료 후 이름 변경이나 정리 중 취소되면 중단 
       "caller",
       ...(scenario.stage.startsWith("rename") ? ["--name", "표시"] : []),
       "--timeout",
-      scenario.stage === "rename-pause" || scenario.stage === "cleanup-close"
-        ? "100ms"
-        : "20ms",
+      "1s",
     ], test.deps);
 
     assertEquals(
@@ -2696,7 +2696,7 @@ Deno.test("시작 실패를 정리하다 오류가 나도 원래 실패 원인�
       "--caller-id",
       "caller",
       "--timeout",
-      "20ms",
+      "1s",
     ], test.deps);
     if (safety != null) clearTimeout(safety);
 
@@ -2852,7 +2852,7 @@ Deno.test("클로드 신뢰 수락 중 취소되거나 전체 시간이 만료�
             },
             herdr({}, {
               onStart: () => {
-                if (interruption === "deadline") now = 100;
+                if (interruption === "deadline") now = 1_000;
               },
             }),
             ...(interruption === "deadline" ? [] : [{
@@ -2874,7 +2874,7 @@ Deno.test("클로드 신뢰 수락 중 취소되거나 전체 시간이 만료�
         "--caller-id",
         "caller",
         "--timeout",
-        "100ms",
+        "1s",
       ], test.deps);
       const code = interruption === "cancelled" ? "cancelled" : "timeout";
       assertEquals(result.code, exitCode(code), result.stdout);
@@ -3879,7 +3879,7 @@ Deno.test("직접 실행이 시작되지 않거나 제한 시간 초과·취소�
     "--agent",
     "codex",
     "--timeout",
-    "1ms",
+    "1s",
   ], timeout.deps);
   assertEquals(timedOut.code, 6);
   assertStringIncludes(timedOut.stdout, "code: timeout");
@@ -5030,6 +5030,25 @@ Deno.test("시작 차단 도움말은 키 입력 명령과 pane 화면·기록 �
     result.stdout.includes("native session UUID가 있으면 wait"),
     false,
   );
+});
+
+Deno.test("밀리초로 timeout을 주면 단위 예시와 함께 실행 전에 거부된다", async () => {
+  await using dir = await createTempDir({ prefix: "delegate-test-" });
+  const base = setup(dir.path, "작업");
+
+  const help = await runDelegate(["prompt", "--help"], base.deps);
+  assertStringIncludes(help.stdout, '["20m"]');
+
+  for (const timeout of ["3000000", "3000000ms"]) {
+    const result = await runDelegate(
+      ["prompt", "--timeout", timeout],
+      base.deps,
+    );
+    assertEquals(result.code, 2, timeout);
+    assertStringIncludes(result.stdout, "단위 필수(s·m·h)");
+    assertStringIncludes(result.stdout, "50m");
+  }
+  assertEquals(base.fake.calls, []);
 });
 
 Deno.test("삭제된 명령과 옵션·위치 prompt는 실행 전에 거부된다", async () => {
