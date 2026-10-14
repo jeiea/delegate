@@ -528,13 +528,6 @@ async function runCommand(
       });
       agent = fallback;
     }
-    if (parsed.detach && agent === "codex") {
-      // 코덱스 이름은 turn 완료 뒤 /rename으로만 붙어 상주 표시를 시작 때 남길 수 없다.
-      throw new DelegateError(
-        "usage",
-        "--detach는 클로드에서만 사용할 수 있습니다",
-      );
-    }
     const model = selectModel(agent, parsed.models);
     const resident = parsed.detach || snapshot?.resident === true;
     const request = {

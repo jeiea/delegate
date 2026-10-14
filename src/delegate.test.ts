@@ -3418,22 +3418,16 @@ Deno.test("상주 클로드 세션을 분리 요청으로 시작·후속·재개
   assertEquals(marksResident(resumed.fake.calls), true);
 });
 
-Deno.test("분리 요청은 직접 실행이나 코덱스와 함께 쓰면 실행 전에 거부되고 스킬·도움말에 드러나지 않는다", async () => {
+Deno.test("분리 요청은 직접 실행과 함께 쓰면 실행 전에 거부되고 스킬·도움말에 드러나지 않는다", async () => {
   await using dir = await createTempDir({ prefix: "delegate-test-" });
   const base = setup(dir.path, "작업");
   for (
     const args of [
       ["prompt", "--detach"],
       ["prompt", "--detach", "--transport", "direct"],
-      ["prompt", "--detach", "--agent", "codex"],
     ]
   ) {
-    const result = await runDelegate(args, {
-      ...base.deps,
-      env: args.includes("codex")
-        ? { ...base.deps.env, HERDR_ENV: "1" }
-        : base.deps.env,
-    });
+    const result = await runDelegate(args, base.deps);
     assertEquals(result.code, 2, args.join(" "));
     assertStringIncludes(result.stdout, "code: usage");
   }
@@ -3442,6 +3436,90 @@ Deno.test("분리 요청은 직접 실행이나 코덱스와 함께 쓰면 실�
     assertEquals(result.stdout.includes("--detach"), false, args.join(" "));
   }
   assertEquals(base.fake.calls, []);
+});
+
+Deno.test("코덱스 상주 세션은 실제 요청 전에 상주 이름을 붙여 시작하고 이름을 바꾼 뒤 일반 요청으로 재개해도 패널을 남긴다", async () => {
+  await using dir = await createTempDir({ prefix: "delegate-test-" });
+  const rollout = codexPath(dir.path);
+  const index = join(dir.path, "codex", "session_index.jsonl");
+  const entry = (thread_name: string) => ({
+    id: codexId,
+    thread_name,
+    updated_at: "2026-10-14T00:00:00Z",
+  });
+  writeJsonl(index, [entry("resident-caller")]);
+  let now = 0;
+  const options = {
+    env: { HERDR_ENV: "1" },
+    now: () => now,
+    sleep: (ms: number) => {
+      now += ms;
+      return Promise.resolve();
+    },
+  };
+  const args = ["--caller-id", "resident-caller"];
+  const title = "/rename [상주] resident-caller";
+  const closesPane = (calls: { args: string[] }[]) =>
+    calls.some((call) => call.args.join(" ") === "pane close pane-delegate");
+  const prompts = (calls: { args: string[] }[]) =>
+    calls.filter((call) => call.args[1] === "prompt").map((call) =>
+      call.args[3]
+    );
+
+  const started = setup(dir.path, "원장 점검", [
+    ...newTabAllocation(),
+    herdr({ agent: unidentifiedAgent("idle", 1) }),
+    herdr({}, {
+      onStart: () => appendJsonl(index, [entry("[상주] resident-caller")]),
+    }),
+    herdr({ agent: currentAgent("working", 2) }, {
+      onStart: () =>
+        writeJsonl(rollout, [codexMeta(), ...codexTurn("t1", "원장 점검")]),
+    }),
+    herdr({}),
+  ], options);
+  const first = await runDelegate(
+    ["prompt", "--agent", "codex", "--detach", ...args],
+    started.deps,
+  );
+  assertEquals(first.code, 0, first.stdout);
+  assertStringIncludes(first.stdout, `session_id: ${codexId}`);
+  assertEquals(prompts(started.fake.calls), [title, "원장 점검"]);
+  assertEquals(
+    started.fake.calls.at(-1)!.args.slice(1).join(" ").endsWith(
+      residentCodex("idle", 1).name,
+    ),
+    true,
+  );
+  assertEquals(closesPane(started.fake.calls), false);
+
+  const resumed = setup(dir.path, "재개", [
+    herdr({ agents: [] }),
+    herdr({ agents: [] }),
+    ...newTabAllocation(),
+    herdr({ agent: residentCodex("idle", 3) }),
+    herdr({}),
+    herdr({ agent: residentCodex("working", 4) }, {
+      onStart: () => appendJsonl(rollout, codexTurn("t2", "재개", "재개 결과")),
+    }),
+    herdr({ agent: residentCodex("done", 5) }),
+    herdr({ agent: residentCodex("done", 5) }),
+    herdr({}),
+  ], options);
+  const reopened = await runDelegate(
+    ["prompt", codexId, ...args, "--name", "마스터"],
+    resumed.deps,
+  );
+  assertEquals(reopened.code, 0, reopened.stdout);
+  assertStringIncludes(reopened.stdout, "재개 결과");
+  const start = resumed.fake.calls.find((call) => call.args[1] === "start")!;
+  assertEquals(start.args[2], residentCodex("idle", 3).name);
+  assertEquals(prompts(resumed.fake.calls), [
+    `${title} 마스터`,
+    "재개",
+    `${title} 마스터`,
+  ]);
+  assertEquals(closesPane(resumed.fake.calls), false);
 });
 
 Deno.test("상주 세션은 일반 요청·대기·재개가 끝나거나 취소돼도 호출자와 같은 위임 단계로 패널을 남기고 닫기 요청으로만 정리된다", async () => {
@@ -5821,6 +5899,13 @@ function residentLive(status: string, sequence: number, id = claudeId) {
   return {
     ...claudeLive(status, sequence, id),
     name: `dlg-r-${id.replaceAll("-", "").slice(0, 26)}`,
+  };
+}
+
+function residentCodex(status: string, sequence: number) {
+  return {
+    ...liveAgent(status, sequence),
+    name: `dlg-r-${codexId.replaceAll("-", "").slice(0, 26)}`,
   };
 }
 

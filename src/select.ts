@@ -24,6 +24,19 @@ export type PlanRequest = {
 
 export const budgetVariable = "DELEGATE_BUDGET";
 
+export const residentTitleMarker = "[상주]";
+
+/** native 세션 이름. 상주 표시는 재개 때 다시 읽도록 맨 앞에 둔다 */
+export function sessionTitle(
+  request: Pick<PlanRequest, "resident" | "callerId" | "name">,
+): string {
+  return [
+    request.resident ? residentTitleMarker : undefined,
+    request.callerId,
+    request.name,
+  ].filter((part) => part != null && part !== "").join(" ");
+}
+
 /** 사람이 연 세션은 값이 없어 조율자·구현·검토 정도의 두 단계를 허용한다 */
 export function delegationBudget(env: Record<string, string>): number {
   const value = env[budgetVariable];

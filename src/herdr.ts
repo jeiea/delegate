@@ -1,5 +1,4 @@
 import { isAbsolute } from "jsr:@std/path@1.1.6";
-import { claudeSessionName } from "./claude.ts";
 import { closeDirect, statusDirect, waitDirect } from "./direct.ts";
 import type {
   DelegateDocument,
@@ -29,6 +28,7 @@ import {
   type Agent,
   callerSessionId,
   type NativeInvocation,
+  sessionTitle,
 } from "./select.ts";
 
 export type HerdrDeps = {
@@ -303,8 +303,7 @@ export async function promptHerdr(
     if (settled.snapshot.agent === "codex" && request.name != null) {
       await renameCodex(
         live,
-        callerId,
-        request.name,
+        sessionTitle({ resident, callerId, name: request.name }),
         settled.snapshot.cwd,
         executionDeps,
       );
@@ -619,7 +618,16 @@ export async function waitHerdr(
       resolveCallerId(options.callerId, deps, snapshot.cwd),
       snapshot.sessionId,
     );
-    await renameCodex(live, callerId, options.name, snapshot.cwd, deps);
+    await renameCodex(
+      live,
+      sessionTitle({
+        resident: isResidentName(live.name),
+        callerId,
+        name: options.name,
+      }),
+      snapshot.cwd,
+      deps,
+    );
   }
   const warnings = await cleanupAutomatically(
     settled.live,
@@ -986,7 +994,7 @@ async function startAgent(
       ...request.invocation.herdrArgs.filter((arg) =>
         !arg.startsWith("--name=")
       ),
-      `--name=${claudeSessionName({ ...request, callerId })}`,
+      `--name=${sessionTitle({ ...request, callerId })}`,
       ...(assignedSessionId == null
         ? []
         : [`--session-id=${assignedSessionId}`]),
@@ -1048,6 +1056,18 @@ async function startAgent(
     deadline,
     deps,
   });
+  if (
+    started != null && request.invocation.agent === "codex" && request.resident
+  ) {
+    // 코덱스는 첫 turn 전 /rename도 이름 색인에 남겨 재개 때 상주 여부를 읽을 수 있다.
+    await submitCodexTitle(
+      name,
+      sessionTitle({ ...request, callerId }),
+      cwd,
+      deps,
+      request.snapshot?.sessionId,
+    );
+  }
   if (started == null) {
     throw new DelegateError(
       "agent_blocked",
@@ -1661,22 +1681,29 @@ async function cleanupAutomatically(
 
 async function renameCodex(
   live: LiveAgent,
-  callerId: string | undefined,
-  name: string,
+  title: string,
   cwd: string,
   deps: HerdrDeps,
 ): Promise<void> {
-  const title = [callerId, name].filter((part) => part != null && part !== "")
-    .join(" ");
   if (title === "") return;
   try {
-    await json(cwd, deps, ["agent", "prompt", live.name, `/rename ${title}`]);
-    await pause(500, deps, live.sessionId);
+    await submitCodexTitle(live.name, title, cwd, deps, live.sessionId);
   } catch (error) {
     const normalized = normalizeError(error);
     if (isLifecycleError(normalized)) throw normalized;
     // Codex local command는 best effort이며 공개 warning을 만들지 않는다.
   }
+}
+
+async function submitCodexTitle(
+  name: string,
+  title: string,
+  cwd: string,
+  deps: HerdrDeps,
+  sessionId?: string,
+): Promise<void> {
+  await json(cwd, deps, ["agent", "prompt", name, `/rename ${title}`]);
+  await pause(500, deps, sessionId);
 }
 
 async function resolveCallerId(

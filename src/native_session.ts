@@ -12,7 +12,11 @@ import {
   type NativeObservation,
   type NativeSessionId,
 } from "./document.ts";
-import { type Agent, stripDelegatePromptPrefix } from "./select.ts";
+import {
+  type Agent,
+  residentTitleMarker,
+  stripDelegatePromptPrefix,
+} from "./select.ts";
 
 export const sessionIdPattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -227,8 +231,46 @@ async function readSnapshot(candidate: Candidate): Promise<SharedSession> {
     },
     turns: parsed.turns,
     observation,
-    resident: parsed.resident === true,
+    resident: (parsed.title ??
+      (candidate.agent === "codex"
+        ? await codexTitle(candidate.root, parsed.sessionId)
+        : undefined))?.split(" ")[0] === residentTitleMarker,
   };
+}
+
+// 코덱스 이름은 롤아웃이 아닌 이름 색인에 추가 기록되며 마지막 항목이 최신이다.
+async function codexTitle(
+  root: string,
+  sessionId: string,
+): Promise<string | undefined> {
+  let text: string;
+  try {
+    text = await Deno.readTextFile(join(root, "session_index.jsonl"));
+  } catch (error) {
+    if (error instanceof Deno.errors.NotFound) return undefined;
+    throw error;
+  }
+  return latestIndexedTitle(text, sessionId);
+}
+
+function latestIndexedTitle(
+  text: string,
+  sessionId: string,
+): string | undefined {
+  let title: string | undefined;
+  for (const line of text.split("\n")) {
+    try {
+      const entry = object(JSON.parse(line));
+      if (String(entry.id).toLowerCase() === sessionId.toLowerCase()) {
+        title = typeof entry.thread_name === "string"
+          ? entry.thread_name
+          : title;
+      }
+    } catch {
+      // 기록 중인 마지막 줄은 다음 조회에서 읽는다.
+    }
+  }
+  return title;
 }
 
 function decodeRecords(data: Uint8Array): {

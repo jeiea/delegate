@@ -4,22 +4,11 @@ import {
   delegationGuard,
   type NativeInvocation,
   type PlanRequest,
+  sessionTitle,
 } from "./select.ts";
 
-export const residentTitleMarker = "[상주]";
-
-export function claudeSessionName(
-  request: Pick<PlanRequest, "resident" | "callerId" | "name">,
-): string {
-  return [
-    request.resident ? residentTitleMarker : undefined,
-    request.callerId,
-    request.name,
-  ].filter((part) => part != null && part !== "").join(" ");
-}
-
 export function planClaude(request: PlanRequest): NativeInvocation {
-  const name = claudeSessionName(request);
+  const name = sessionTitle(request);
   const permission = request.permission === "read-only"
     ? [
       "--permission-mode=auto",
@@ -187,7 +176,7 @@ export function parseClaudeSession(
     sessionId,
     cwd,
     turns,
-    resident: title?.split(" ")[0] === residentTitleMarker,
+    title,
   };
 }
 
