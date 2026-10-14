@@ -19,6 +19,7 @@ Deno.test("Codex 인자는 권한과 재개 여부에 관계없이 시작 전 �
         cwd: "/workspace",
         addDirs: [],
         prompt: "작업",
+        budget: 1,
         ...request,
       } satisfies PlanRequest,
     );
@@ -57,6 +58,7 @@ Deno.test("읽기 전용 Codex는 파일 쓰기만 막고 네트워크 조회는
     cwd: "/workspace",
     addDirs: [],
     prompt: "조사",
+    budget: 1,
     permission: "read-only",
   });
 
@@ -80,6 +82,7 @@ Deno.test("추가 디렉터리를 지정해도 읽기 전용 Codex는 시작하�
       cwd: "/workspace",
       addDirs: ["/extra"],
       prompt: "조사",
+      budget: 1,
       permission,
     });
 

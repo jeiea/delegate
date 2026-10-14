@@ -1,4 +1,5 @@
 import {
+  budgetVariable,
   delegationGuard,
   type NativeInvocation,
   type PlanRequest,
@@ -42,6 +43,8 @@ export function planCodex(request: PlanRequest): NativeInvocation {
     "--search",
     "-c",
     "check_for_update_on_startup=false",
+    "-c",
+    `shell_environment_policy.set.${budgetVariable}="${request.budget}"`,
     ...permission,
     "-C",
     request.cwd,

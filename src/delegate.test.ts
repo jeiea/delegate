@@ -19,7 +19,7 @@ Deno.test("코덱스 연결이 늦어져도 확정된 세션을 먼저 알리고
   const promptPath = join(dir.path, "prompt.md");
   const nativePath = codexPath(dir.path);
   const filePrompt = "첫 문단입니다.\n\n둘째 문단입니다.\n";
-  const sentPrompt = `${prefix}첫 문단입니다.\n\n둘째 문단입니다.`;
+  const sentPrompt = `첫 문단입니다.\n\n둘째 문단입니다.`;
   Deno.writeTextFileSync(promptPath, `\uFEFF${filePrompt}`);
   let now = 0;
   const streamed: string[] = [];
@@ -473,7 +473,7 @@ Deno.test("진행 중인 코덱스 작업에 후속 요청을 보내면 같은 �
   assertEquals(prompted.stdout.includes("intervening_prompts:"), false);
   assertEquals(now > 5_000, true);
   const followUp = start.fake.calls.find((call) =>
-    call.args[1] === "prompt" && call.args[3] === `${prefix}후속 요청`
+    call.args[1] === "prompt" && call.args[3] === "후속 요청"
   );
   assertEquals(followUp?.args.includes("--wait"), false);
 
@@ -2995,7 +2995,7 @@ Deno.test("클로드는 시작 화면에 폴더 신뢰 확인이 보이면 권�
       "agent",
       "prompt",
       name,
-      `${prefix}작업`,
+      "작업",
     ]);
     assertEquals(
       test.fake.calls.filter((call) => call.args[1] === "send-keys").length,
@@ -3288,7 +3288,7 @@ Deno.test("클로드 시작에 승인이 필요하면 기록이 생기기 전에
   }
 });
 
-Deno.test("상주 클로드 세션을 분리 요청으로 시작·후속·재개하면 하위 위임을 막지 않고 제출과 세션 확인까지만 기다리며 전달이 불확실하거나 호출자가 중단돼도 패널을 남긴다", async () => {
+Deno.test("상주 클로드 세션을 분리 요청으로 시작·후속·재개하면 호출자의 위임 단계를 그대로 넘기고 제출과 세션 확인까지만 기다리며 전달이 불확실하거나 호출자가 중단돼도 패널을 남긴다", async () => {
   await using dir = await createTempDir({ prefix: "delegate-test-" });
   let now = 0;
   const clock = {
@@ -3298,16 +3298,17 @@ Deno.test("상주 클로드 세션을 분리 요청으로 시작·후속·재개
       return Promise.resolve();
     },
   };
-  const env = { HERDR_ENV: "1" };
+  const env = { HERDR_ENV: "1", DELEGATE_BUDGET: "1" };
   const callerArgs = ["--caller-id", "resident-caller", "--detach"];
   const untouchedPane = (calls: { args: string[] }[]) =>
     calls.every((call) =>
       call.args[1] !== "wait" &&
       call.args.join(" ") !== "pane close pane-delegate"
     );
-  const allowsDelegation = (calls: { args: string[] }[]) =>
+  const keepsBudget = (calls: { args: string[] }[]) =>
     calls.every((call) =>
-      !call.args.includes("--disallowedTools=Skill(delegate)") &&
+      (call.args[1] !== "start" ||
+        call.args.includes(budgetSettings(1))) &&
       !(call.args[1] === "prompt" && call.args[3]!.startsWith(prefix))
     );
 
@@ -3341,7 +3342,7 @@ Deno.test("상주 클로드 세션을 분리 요청으로 시작·후속·재개
   assertEquals(first.stdout.endsWith("---\n"), true);
   assertEquals(started.fake.calls.length, 7);
   assertEquals(untouchedPane(started.fake.calls), true);
-  assertEquals(allowsDelegation(started.fake.calls), true);
+  assertEquals(keepsBudget(started.fake.calls), true);
 
   const live = claudeLive("working", 2, id);
   const controller = new AbortController();
@@ -3368,7 +3369,7 @@ Deno.test("상주 클로드 세션을 분리 요청으로 시작·후속·재개
   assertStringIncludes(second.stdout, "activity: working");
   assertEquals(followed.fake.calls.length, 2);
   assertEquals(followed.fake.calls[1]!.args.includes("--wait"), false);
-  assertEquals(allowsDelegation(followed.fake.calls), true);
+  assertEquals(keepsBudget(followed.fake.calls), true);
 
   const resumeStart = [
     herdr({ agents: [] }),
@@ -3408,7 +3409,7 @@ Deno.test("상주 클로드 세션을 분리 요청으로 시작·후속·재개
   )!;
   assertEquals(resumedStart.args.includes(`--resume=${id}`), true);
   assertEquals(untouchedPane(resumed.fake.calls), true);
-  assertEquals(allowsDelegation(resumed.fake.calls), true);
+  assertEquals(keepsBudget(resumed.fake.calls), true);
 });
 
 Deno.test("분리 요청은 직접 실행이나 코덱스 이름 지정과 함께 쓰면 실행 전에 거부되고 스킬·도움말에 드러나지 않는다", async () => {
@@ -3435,6 +3436,52 @@ Deno.test("분리 요청은 직접 실행이나 코덱스 이름 지정과 함�
     assertEquals(result.stdout.includes("--detach"), false, args.join(" "));
   }
   assertEquals(base.fake.calls, []);
+});
+
+Deno.test("남은 위임 단계가 없으면 새 위임을 거절하고 있으면 자식 셸에 한 단계 줄여 넘기며 마지막 단계에만 재위임 금지를 붙인다", async () => {
+  await using dir = await createTempDir({ prefix: "delegate-test-" });
+  for (const budget of ["0", "x"]) {
+    const refused = setup(dir.path, "작업", [], {
+      env: { DELEGATE_BUDGET: budget },
+    });
+    const result = await runDelegate(
+      ["prompt", "--agent", "claude"],
+      refused.deps,
+    );
+    assertEquals(result.code, 2, budget);
+    assertStringIncludes(result.stdout, "DELEGATE_BUDGET");
+    assertEquals(refused.fake.calls, []);
+  }
+
+  const human = setup(dir.path, "작업", [directReply("claude")]);
+  assertEquals(
+    (await runDelegate(["prompt", "--agent", "claude"], human.deps)).code,
+    0,
+  );
+  assertEquals(human.fake.calls[0]!.args.includes(budgetSettings(1)), true);
+  assertEquals(
+    human.fake.calls[0]!.args.some((arg) =>
+      arg.startsWith("--disallowedTools")
+    ),
+    false,
+  );
+  assertEquals(human.fake.calls[0]!.stdin, "작업");
+
+  const last = setup(dir.path, "작업", [directReply("codex")], {
+    env: { DELEGATE_BUDGET: "1" },
+  });
+  assertEquals(
+    (await runDelegate(["prompt", "--agent", "codex"], last.deps)).code,
+    0,
+  );
+  const codexArgs = last.fake.calls[0]!.args;
+  assertEquals(
+    codexArgs[
+      codexArgs.indexOf('shell_environment_policy.set.DELEGATE_BUDGET="0"') - 1
+    ],
+    "-c",
+  );
+  assertEquals(last.fake.calls[0]!.stdin, `${prefix}작업`);
 });
 
 Deno.test("클로드에 요청한 뒤 차단되면 기록이 없어도 패널 화면과 차단 상태를 보여준다", async () => {
@@ -5653,6 +5700,12 @@ function claudeLive(status: string, sequence: number, id = claudeId) {
     tab_id: "tab-delegate",
     pane_id: "pane-delegate",
   };
+}
+
+function budgetSettings(budget: number): string {
+  return `--settings=${
+    JSON.stringify({ env: { DELEGATE_BUDGET: String(budget) } })
+  }`;
 }
 
 function currentClaude(status: string, sequence: number) {

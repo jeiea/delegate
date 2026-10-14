@@ -18,7 +18,6 @@ allowed-tools: Bash(herdr *) Bash(deno run *)
 - 역할·배경·확인한 사실·작업·종료 조건 전달
   - 선행 조사는 위임, 호출자만 접근 가능한 정보·실행 결과 포함
   - 작업 디렉터리의 `AGENTS.md`·`CLAUDE.md`는 자동 공유
-- 종속 세션의 재위임 금지 명시
 - 읽기 전용 필요 시 `--permission read-only`
 - 프롬프트는 heredoc 표준 입력 또는 `--prompt-file`로 전달
   - 실제 개행 사용, 실행 후 표준 입력 전달 금지

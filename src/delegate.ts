@@ -54,7 +54,9 @@ import { denoExec, type Exec, hasExecutable } from "./process.ts";
 import {
   type Agent,
   type AgentOption,
+  budgetVariable,
   callerSessionId,
+  delegationBudget,
   type Effort,
   formatDuration,
   type NativeInvocation,
@@ -471,6 +473,13 @@ async function runCommand(
       return success(await closeHerdr(snapshot, herdrDeps));
     }
 
+    const budget = delegationBudget(deps.env);
+    if (budget === 0) {
+      throw new DelegateError(
+        "usage",
+        `남은 위임 단계가 없어 새 위임을 거절합니다(${budgetVariable}=0). 직접 수행하세요`,
+      );
+    }
     const prompt = await readPrompt(parsed.promptFile, deps);
     if (prompt.trim() === "") {
       throw new DelegateError("usage", "빈 프롬프트입니다");
@@ -537,7 +546,8 @@ async function runCommand(
       callerId: parsed.callerId ?? callerSessionId(deps.env),
       name: parsed.name,
       resumeSessionId: snapshot?.sessionId,
-      allowDelegation: parsed.detach,
+      // 상주 조율자는 부모와 대등해 같은 단계를 받는다. 부모 값을 넘지 않아 우회할 수 없다.
+      budget: parsed.detach ? budget : budget - 1,
     };
     const invocation = agent === "codex"
       ? planCodex(request)

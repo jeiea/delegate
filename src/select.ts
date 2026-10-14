@@ -16,12 +16,28 @@ export type PlanRequest = {
   callerId?: string;
   name?: string;
   resumeSessionId?: string;
-  /** 하위 세션을 위임하는 상주 세션은 재위임 금지를 붙이지 않는다 */
-  allowDelegation?: boolean;
+  /** 자식 세션의 셸에 넘길 남은 위임 단계 수 */
+  budget: number;
 };
 
+export const budgetVariable = "DELEGATE_BUDGET";
+
+/** 사람이 연 세션은 값이 없어 조율자·구현·검토 정도의 두 단계를 허용한다 */
+export function delegationBudget(env: Record<string, string>): number {
+  const value = env[budgetVariable];
+  if (value == null) return 2;
+  if (!/^\d+$/.test(value)) {
+    throw new DelegateError(
+      "usage",
+      `${budgetVariable}는 0 이상의 정수여야 합니다: ${value}`,
+    );
+  }
+  return Number(value);
+}
+
+/** 강제는 자식 셸의 남은 단계 수가 맡고, 문구는 더 위임할 수 없는 세션에 알리기만 한다 */
 export function delegationGuard(request: PlanRequest): string {
-  return request.allowDelegation ? "" : delegatePromptPrefix;
+  return request.budget === 0 ? delegatePromptPrefix : "";
 }
 
 export type NativeInvocation = {

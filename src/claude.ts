@@ -1,5 +1,6 @@
 import type { ParsedAgentOutput, ParsedSession } from "./codex.ts";
 import {
+  budgetVariable,
   delegationGuard,
   type NativeInvocation,
   type PlanRequest,
@@ -21,7 +22,9 @@ export function planClaude(request: PlanRequest): NativeInvocation {
       "--allowedTools=WebSearch,WebFetch(domain:*)",
     ];
   const shared = [
-    ...(request.allowDelegation ? [] : ["--disallowedTools=Skill(delegate)"]),
+    `--settings=${
+      JSON.stringify({ env: { [budgetVariable]: String(request.budget) } })
+    }`,
     ...(request.model == null ? [] : [`--model=${request.model}`]),
     ...(request.effort == null ? [] : [`--effort=${request.effort}`]),
     ...permission,

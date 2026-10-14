@@ -6,6 +6,7 @@ Deno.test("읽기 전용 Claude는 auto 모드로 판단하고 남은 권한 요
     cwd: "/workspace",
     addDirs: [],
     prompt: "조사",
+    budget: 1,
     permission: "read-only",
   });
 
