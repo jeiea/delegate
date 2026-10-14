@@ -1,6 +1,6 @@
 import type { ParsedAgentOutput, ParsedSession } from "./codex.ts";
 import {
-  delegatePromptPrefix,
+  delegationGuard,
   type NativeInvocation,
   type PlanRequest,
 } from "./select.ts";
@@ -21,7 +21,7 @@ export function planClaude(request: PlanRequest): NativeInvocation {
       "--allowedTools=WebSearch,WebFetch(domain:*)",
     ];
   const shared = [
-    "--disallowedTools=Skill(delegate)",
+    ...(request.allowDelegation ? [] : ["--disallowedTools=Skill(delegate)"]),
     ...(request.model == null ? [] : [`--model=${request.model}`]),
     ...(request.effort == null ? [] : [`--effort=${request.effort}`]),
     ...permission,
@@ -42,7 +42,7 @@ export function planClaude(request: PlanRequest): NativeInvocation {
       "-",
     ],
     herdrArgs: shared,
-    prompt: delegatePromptPrefix + request.prompt,
+    prompt: delegationGuard(request) + request.prompt,
   };
 }
 

@@ -1,5 +1,5 @@
 import {
-  delegatePromptPrefix,
+  delegationGuard,
   type NativeInvocation,
   type PlanRequest,
 } from "./select.ts";
@@ -69,7 +69,7 @@ export function planCodex(request: PlanRequest): NativeInvocation {
       "-",
     ],
     herdrArgs: [...globals, ...resume],
-    prompt: delegatePromptPrefix + request.prompt,
+    prompt: delegationGuard(request) + request.prompt,
   };
 }
 

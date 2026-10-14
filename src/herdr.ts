@@ -55,6 +55,7 @@ export type HerdrPrompt = {
   startOptionsSpecified: boolean;
   model?: string;
   warnings: readonly DelegateWarning[];
+  detach: boolean;
 };
 
 type HerdrResult = Record<string, unknown>;
@@ -295,6 +296,13 @@ export async function promptHerdr(
         diagnostic = { ...diagnostic, name: deterministic };
       }
     }
+    if (request.detach) {
+      return document(snapshot, activityOf(live.status), {
+        model,
+        warnings: [...request.warnings, ...ignoredModel],
+        retry,
+      });
+    }
     live.sessionId = snapshot.sessionId;
     live.kind = snapshot.agent;
     live.cwd = snapshot.cwd;
@@ -345,7 +353,7 @@ export async function promptHerdr(
       retry: normalized.retry ?? retry,
     });
     if (diagnostic == null) throw preserved;
-    throw preserved.code === "cancelled"
+    throw preserved.code === "cancelled" && !request.detach
       ? await closeCancelledPane(preserved, diagnostic, snapshot, deps)
       : await diagnosePane(preserved, diagnostic, deps);
   }
@@ -726,8 +734,9 @@ async function submitPrompt(
     );
   } catch (error) {
     const normalized = normalizeError(error);
+    // 완료까지 기다리면 결과로 전달을 확인한다. 분리 요청은 그럴 수 없어 아래에서 pane을 보존한 채 실패를 알린다.
     if (
-      origin === "started" &&
+      origin === "started" && !request.detach &&
       (normalized.code === "timeout" || error instanceof RetainPaneError)
     ) {
       return { live, deliveryUncertain: true };
@@ -781,7 +790,8 @@ async function submitPromptOnly(
   return {
     live: prompted.live,
     boundaryCursor: before,
-    awaitNewTurn: origin === "existing" &&
+    // 분리 요청은 결과 경계가 필요 없어 진행 중 turn 뒤의 새 turn을 기다리지 않는다.
+    awaitNewTurn: !request.detach && origin === "existing" &&
       ["working", "unknown"].includes(statusBeforePrompt),
     deliveryUncertain: prompted.deliveryUncertain,
   };

@@ -91,6 +91,7 @@ type PromptOptions = {
   callerId?: string;
   name?: string;
   timeoutMs: number;
+  detach: boolean;
 };
 
 type ParsedCommand = PromptOptions | {
@@ -205,6 +206,10 @@ function parser() {
           }),
           1_200_000,
         ),
+        // 상주 관제 세션 전용. 제출·session ID 확정까지만 기다리고
+        // pane을 닫지 않아 「턴 종료 후 pane 정리」의 예외가 된다. 일반 위임이
+        // pane을 쌓지 않도록 스킬 문서와 --help에는 노출하지 않는다.
+        detach: option("--detach", { hidden: true }),
       }),
       {
         brief: message`새 native session 시작 또는 기존 session에 후속 prompt`,
@@ -479,6 +484,12 @@ async function runCommand(
         "Herdr 전송을 사용할 수 없습니다",
       );
     }
+    if (parsed.detach && transport === "direct") {
+      throw new DelegateError(
+        "usage",
+        "--detach는 Herdr 전송에서만 사용할 수 있습니다",
+      );
+    }
     const snapshot = parsed.target == null
       ? undefined
       : await findNativeSession(parsed.target, deps.env);
@@ -508,6 +519,13 @@ async function runCommand(
       });
       agent = fallback;
     }
+    if (parsed.detach && agent === "codex" && parsed.name != null) {
+      // 코덱스 이름은 turn 완료 뒤 /rename으로 붙인다.
+      throw new DelegateError(
+        "usage",
+        "코덱스 --detach에는 --name을 사용할 수 없습니다",
+      );
+    }
     const model = selectModel(agent, parsed.models);
     const request = {
       permission: parsed.permission ?? "write",
@@ -519,6 +537,7 @@ async function runCommand(
       callerId: parsed.callerId ?? callerSessionId(deps.env),
       name: parsed.name,
       resumeSessionId: snapshot?.sessionId,
+      allowDelegation: parsed.detach,
     };
     const invocation = agent === "codex"
       ? planCodex(request)
@@ -548,6 +567,7 @@ async function runCommand(
         startOptionsSpecified,
         model,
         warnings,
+        detach: parsed.detach,
       }, herdrDeps),
     );
   } catch (error) {

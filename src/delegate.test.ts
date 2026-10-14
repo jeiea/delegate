@@ -3288,6 +3288,155 @@ Deno.test("클로드 시작에 승인이 필요하면 기록이 생기기 전에
   }
 });
 
+Deno.test("상주 클로드 세션을 분리 요청으로 시작·후속·재개하면 하위 위임을 막지 않고 제출과 세션 확인까지만 기다리며 전달이 불확실하거나 호출자가 중단돼도 패널을 남긴다", async () => {
+  await using dir = await createTempDir({ prefix: "delegate-test-" });
+  let now = 0;
+  const clock = {
+    now: () => now,
+    sleep: (ms: number) => {
+      now += ms;
+      return Promise.resolve();
+    },
+  };
+  const env = { HERDR_ENV: "1" };
+  const callerArgs = ["--caller-id", "resident-caller", "--detach"];
+  const untouchedPane = (calls: { args: string[] }[]) =>
+    calls.every((call) =>
+      call.args[1] !== "wait" &&
+      call.args.join(" ") !== "pane close pane-delegate"
+    );
+  const allowsDelegation = (calls: { args: string[] }[]) =>
+    calls.every((call) =>
+      !call.args.includes("--disallowedTools=Skill(delegate)") &&
+      !(call.args[1] === "prompt" && call.args[3]!.startsWith(prefix))
+    );
+
+  let id = "";
+  const started = setup(dir.path, "원장 점검", [
+    ...newTabAllocation(),
+    herdr({ agent: unidentifiedClaude("working", 1) }),
+    readyClaudeScreen(),
+    herdr({ agent: unidentifiedClaude("working", 1) }, {
+      onStart: () => {
+        const start = started.fake.calls.find((call) =>
+          call.args[1] === "start"
+        )!;
+        id = start.args.find((arg) => arg.startsWith("--session-id="))!
+          .slice("--session-id=".length);
+        writeJsonl(
+          claudePath(dir.path, id),
+          claudeOpen("원장 점검", id),
+        );
+      },
+    }),
+    herdr({ agent: unidentifiedClaude("working", 1) }),
+  ], { env, ...clock });
+  const first = await runDelegate(
+    ["prompt", "--agent", "claude", ...callerArgs],
+    started.deps,
+  );
+  assertEquals(first.code, 0, first.stdout);
+  assertStringIncludes(first.stdout, `session_id: ${id}`);
+  assertStringIncludes(first.stdout, "activity: working");
+  assertEquals(first.stdout.endsWith("---\n"), true);
+  assertEquals(started.fake.calls.length, 7);
+  assertEquals(untouchedPane(started.fake.calls), true);
+  assertEquals(allowsDelegation(started.fake.calls), true);
+
+  const live = claudeLive("working", 2, id);
+  const controller = new AbortController();
+  const interrupted = setup(dir.path, "다음 요청", [
+    herdr({ agents: [live] }),
+    herdr({ agent: live }, { onStart: () => controller.abort() }),
+  ], { env, signal: controller.signal, ...clock });
+  const cancelled = await runDelegate(
+    ["prompt", id, ...callerArgs],
+    interrupted.deps,
+  );
+  assertEquals(cancelled.code, 130, cancelled.stdout);
+  assertEquals(interrupted.fake.calls.length, 2);
+
+  const followed = setup(dir.path, "다음 요청", [
+    herdr({ agents: [live] }),
+    herdr({ agent: live }),
+  ], { env, ...clock });
+  const second = await runDelegate(
+    ["prompt", id, ...callerArgs],
+    followed.deps,
+  );
+  assertEquals(second.code, 0, second.stdout);
+  assertStringIncludes(second.stdout, "activity: working");
+  assertEquals(followed.fake.calls.length, 2);
+  assertEquals(followed.fake.calls[1]!.args.includes("--wait"), false);
+  assertEquals(allowsDelegation(followed.fake.calls), true);
+
+  const resumeStart = [
+    herdr({ agents: [] }),
+    herdr({ agents: [] }),
+    ...newTabAllocation(),
+    herdr({ agent: claudeLive("idle", 3, id) }),
+    readyClaudeScreen(),
+  ];
+  const unconfirmed = setup(dir.path, "재개 요청", [
+    ...resumeStart,
+    herdrError("timeout", "agent did not reach working"),
+  ], { env, ...clock });
+  const lost = await runDelegate(
+    ["prompt", id, ...callerArgs],
+    unconfirmed.deps,
+  );
+  assertEquals(lost.code, 6, lost.stdout);
+  assertStringIncludes(lost.stdout, `session_id: ${id}`);
+  assertEquals(untouchedPane(unconfirmed.fake.calls), true);
+
+  const resumed = setup(dir.path, "재개 요청", [
+    ...resumeStart,
+    herdr({ agent: claudeLive("working", 4, id) }, {
+      onStart: () =>
+        appendJsonl(
+          claudePath(dir.path, id),
+          claudeOpen("재개 요청", id),
+        ),
+    }),
+  ], { env, ...clock });
+  const third = await runDelegate(["prompt", id, ...callerArgs], resumed.deps);
+  assertEquals(third.code, 0, third.stdout);
+  assertStringIncludes(third.stdout, `session_id: ${id}`);
+  assertStringIncludes(third.stdout, "activity: working");
+  const resumedStart = resumed.fake.calls.find((call) =>
+    call.args[1] === "start"
+  )!;
+  assertEquals(resumedStart.args.includes(`--resume=${id}`), true);
+  assertEquals(untouchedPane(resumed.fake.calls), true);
+  assertEquals(allowsDelegation(resumed.fake.calls), true);
+});
+
+Deno.test("분리 요청은 직접 실행이나 코덱스 이름 지정과 함께 쓰면 실행 전에 거부되고 스킬·도움말에 드러나지 않는다", async () => {
+  await using dir = await createTempDir({ prefix: "delegate-test-" });
+  const base = setup(dir.path, "작업");
+  for (
+    const args of [
+      ["prompt", "--detach"],
+      ["prompt", "--detach", "--transport", "direct"],
+      ["prompt", "--detach", "--agent", "codex", "--name", "마스터"],
+    ]
+  ) {
+    const result = await runDelegate(args, {
+      ...base.deps,
+      env: args.includes("--name")
+        ? { ...base.deps.env, HERDR_ENV: "1" }
+        : base.deps.env,
+    });
+    assertEquals(result.code, 2, args.join(" "));
+    assertStringIncludes(result.stdout, "code: usage");
+  }
+  for (const args of [["--skill"], ["prompt", "--help"]]) {
+    const result = await runDelegate(args, base.deps);
+    assertEquals(result.stdout.includes("--detach"), false, args.join(" "));
+  }
+  assertEquals(base.fake.calls, []);
+});
+
 Deno.test("클로드에 요청한 뒤 차단되면 기록이 없어도 패널 화면과 차단 상태를 보여준다", async () => {
   await using dir = await createTempDir({ prefix: "delegate-test-" });
   let now = 0;

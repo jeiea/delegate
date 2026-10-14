@@ -16,7 +16,13 @@ export type PlanRequest = {
   callerId?: string;
   name?: string;
   resumeSessionId?: string;
+  /** 하위 세션을 위임하는 상주 세션은 재위임 금지를 붙이지 않는다 */
+  allowDelegation?: boolean;
 };
+
+export function delegationGuard(request: PlanRequest): string {
+  return request.allowDelegation ? "" : delegatePromptPrefix;
+}
 
 export type NativeInvocation = {
   agent: Agent;
