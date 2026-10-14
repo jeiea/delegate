@@ -25,6 +25,7 @@ export type ParsedSession = {
   sessionId?: string;
   cwd?: string;
   turns: ParsedTurn[];
+  resident?: boolean;
 };
 
 export function planCodex(request: PlanRequest): NativeInvocation {

@@ -6,10 +6,20 @@ import {
   type PlanRequest,
 } from "./select.ts";
 
+export const residentTitleMarker = "[상주]";
+
+export function claudeSessionName(
+  request: Pick<PlanRequest, "resident" | "callerId" | "name">,
+): string {
+  return [
+    request.resident ? residentTitleMarker : undefined,
+    request.callerId,
+    request.name,
+  ].filter((part) => part != null && part !== "").join(" ");
+}
+
 export function planClaude(request: PlanRequest): NativeInvocation {
-  const name = [request.callerId, request.name]
-    .filter((part) => part != null)
-    .join(" ");
+  const name = claudeSessionName(request);
   const permission = request.permission === "read-only"
     ? [
       "--permission-mode=auto",
@@ -87,6 +97,7 @@ export function parseClaudeSession(
     }
     | undefined;
   let groupOrder = 0;
+  let title: string | undefined;
   const turns: ParsedSession["turns"] = [];
   const background = new Set<string>();
 
@@ -103,6 +114,9 @@ export function parseClaudeSession(
     }
     sessionId ??= stringValue(event.sessionId) ?? stringValue(event.session_id);
     cwd ??= stringValue(event.cwd);
+    if (event.type === "custom-title") {
+      title = stringValue(event.customTitle) ?? title;
+    }
     trackBackground(event, background);
     const prompt = humanPrompt(event);
     if (prompt != null) {
@@ -169,7 +183,12 @@ export function parseClaudeSession(
       end: records.at(-1)?.end ?? active.start,
     });
   }
-  return { sessionId, cwd, turns };
+  return {
+    sessionId,
+    cwd,
+    turns,
+    resident: title?.split(" ")[0] === residentTitleMarker,
+  };
 }
 
 // 작업을 기다리는 중 받은 후속 요청도 작업이 끝나야 완료된다.

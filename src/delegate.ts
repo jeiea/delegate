@@ -209,8 +209,8 @@ function parser() {
           1_200_000,
         ),
         // 상주 관제 세션 전용. 제출·session ID 확정까지만 기다리고
-        // pane을 닫지 않아 「턴 종료 후 pane 정리」의 예외가 된다. 일반 위임이
-        // pane을 쌓지 않도록 스킬 문서와 --help에는 노출하지 않는다.
+        // 상주로 표시해 이후 prompt·wait도 pane을 닫지 않는 「턴 종료 후 pane 정리」의
+        // 예외가 된다. 일반 위임이 pane을 쌓지 않도록 스킬 문서와 --help에는 노출하지 않는다.
         detach: option("--detach", { hidden: true }),
       }),
       {
@@ -528,14 +528,15 @@ async function runCommand(
       });
       agent = fallback;
     }
-    if (parsed.detach && agent === "codex" && parsed.name != null) {
-      // 코덱스 이름은 turn 완료 뒤 /rename으로 붙인다.
+    if (parsed.detach && agent === "codex") {
+      // 코덱스 이름은 turn 완료 뒤 /rename으로만 붙어 상주 표시를 시작 때 남길 수 없다.
       throw new DelegateError(
         "usage",
-        "코덱스 --detach에는 --name을 사용할 수 없습니다",
+        "--detach는 클로드에서만 사용할 수 있습니다",
       );
     }
     const model = selectModel(agent, parsed.models);
+    const resident = parsed.detach || snapshot?.resident === true;
     const request = {
       permission: parsed.permission ?? "write",
       cwd: snapshot?.cwd ?? deps.cwd,
@@ -546,8 +547,9 @@ async function runCommand(
       callerId: parsed.callerId ?? callerSessionId(deps.env),
       name: parsed.name,
       resumeSessionId: snapshot?.sessionId,
+      resident,
       // 상주 조율자는 부모와 대등해 같은 단계를 받는다. 부모 값을 넘지 않아 우회할 수 없다.
-      budget: parsed.detach ? budget : budget - 1,
+      budget: resident ? budget : budget - 1,
     };
     const invocation = agent === "codex"
       ? planCodex(request)
@@ -578,6 +580,7 @@ async function runCommand(
         model,
         warnings,
         detach: parsed.detach,
+        resident: request.resident,
       }, herdrDeps),
     );
   } catch (error) {

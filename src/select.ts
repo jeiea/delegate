@@ -18,6 +18,8 @@ export type PlanRequest = {
   resumeSessionId?: string;
   /** 자식 세션의 셸에 넘길 남은 위임 단계 수 */
   budget: number;
+  /** 상주 세션은 pane을 자동으로 닫지 않으며 native 이름에 표시를 남긴다 */
+  resident?: boolean;
 };
 
 export const budgetVariable = "DELEGATE_BUDGET";

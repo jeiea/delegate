@@ -1,4 +1,5 @@
 import { isAbsolute } from "jsr:@std/path@1.1.6";
+import { claudeSessionName } from "./claude.ts";
 import { closeDirect, statusDirect, waitDirect } from "./direct.ts";
 import type {
   DelegateDocument,
@@ -56,6 +57,7 @@ export type HerdrPrompt = {
   model?: string;
   warnings: readonly DelegateWarning[];
   detach: boolean;
+  resident: boolean;
 };
 
 type HerdrResult = Record<string, unknown>;
@@ -130,6 +132,8 @@ export async function promptHerdr(
       model: request.model,
     }];
   const model = live == null ? request.model : undefined;
+  // 상주 여부는 시작·재개 때 정해지고 실행 중에는 Herdr 이름이 유지한다.
+  const resident = live == null ? request.resident : isResidentName(live.name);
   const callerId = await withSessionError(
     resolveCallerId(
       request.callerId,
@@ -266,7 +270,7 @@ export async function promptHerdr(
     if (expected == null) {
       await executionDeps.stdout?.(renderSessionHead(snapshot.sessionId));
     }
-    const deterministic = deterministicName(snapshot.sessionId);
+    const deterministic = agentName(snapshot.sessionId, resident);
     if (live.name !== deterministic) {
       await renameAgent(live.name, deterministic, snapshot, executionDeps);
       live.name = deterministic;
@@ -331,7 +335,7 @@ export async function promptHerdr(
       retry: normalized.retry ?? retry,
     });
     if (diagnostic == null) throw preserved;
-    throw preserved.code === "cancelled" && !request.detach
+    throw preserved.code === "cancelled" && !request.detach && !resident
       ? await closeCancelledPane(preserved, diagnostic, snapshot, deps)
       : await diagnosePane(preserved, diagnostic, deps);
   }
@@ -545,9 +549,8 @@ export async function diagnoseSessionPane(
       signal,
       () => json(cwd, deps, ["agent", "list"], signal),
     );
-    const name = deterministicName(sessionId);
     const candidates = arrayObjects(result.agents).filter((value) =>
-      nameOf(value) === name &&
+      isSessionAgentName(nameOf(value), sessionId) &&
       (sessionOf(value) == null ||
         sessionOf(value)?.toLowerCase() === sessionId.toLowerCase()) &&
       stringValue(value.cwd) === cwd
@@ -555,6 +558,7 @@ export async function diagnoseSessionPane(
     if (candidates.length !== 1) return undefined;
     const live = liveFrom(candidates[0]!);
     if (live.paneId == null || live.kind == null) return undefined;
+    const name = live.name;
     const code = live.status === "blocked"
       ? "agent_blocked"
       : "invalid_native_session";
@@ -967,8 +971,8 @@ async function startAgent(
   const name = request.snapshot == null
     ? assignedSessionId == null
       ? `dlg-tmp-${crypto.randomUUID().slice(0, 8)}`
-      : deterministicName(assignedSessionId)
-    : deterministicName(request.snapshot.sessionId);
+      : agentName(assignedSessionId, request.resident)
+    : agentName(request.snapshot.sessionId, request.resident);
   located({
     name,
     paneId: pane.paneId,
@@ -982,10 +986,7 @@ async function startAgent(
       ...request.invocation.herdrArgs.filter((arg) =>
         !arg.startsWith("--name=")
       ),
-      `--name=${
-        [callerId, request.name].filter((part) => part != null && part !== "")
-          .join(" ")
-      }`,
+      `--name=${claudeSessionName({ ...request, callerId })}`,
       ...(assignedSessionId == null
         ? []
         : [`--session-id=${assignedSessionId}`]),
@@ -1405,8 +1406,9 @@ async function findLiveAgent(
   const bySession = agents.filter((agent) =>
     sessionOf(agent)?.toLowerCase() === snapshot.sessionId.toLowerCase()
   );
-  const deterministic = deterministicName(snapshot.sessionId);
-  const byName = agents.filter((agent) => nameOf(agent) === deterministic);
+  const byName = agents.filter((agent) =>
+    isSessionAgentName(nameOf(agent), snapshot.sessionId)
+  );
   const candidates = uniqueObjects([...bySession, ...byName]);
   if (candidates.length === 0) return undefined;
   if (candidates.length !== 1) {
@@ -1503,11 +1505,10 @@ async function allocatePane(
   );
   if (candidates.length > 1 && sessionId != null) {
     const panes = await listPanes(workspaceId, cwd, deps);
-    const target = deterministicName(sessionId);
     const tabIds = new Set(
-      panes.filter((pane) => pane.agentName === target).map((pane) =>
-        pane.tabId
-      ),
+      panes.filter((pane) =>
+        isSessionAgentName(pane.agentName ?? undefined, sessionId)
+      ).map((pane) => pane.tabId),
     );
     candidates = candidates.filter((tab) => tabIds.has(tab.tabId));
   }
@@ -1631,6 +1632,8 @@ async function cleanupAutomatically(
   deadline: number,
   deps: HerdrDeps,
 ): Promise<DelegateWarning[] | undefined> {
+  // 상주 세션은 Herdr에서 계속 보이도록 close로만 정리한다.
+  if (isResidentName(live.name)) return undefined;
   if (live.paneId == null) {
     return [{
       code: "cleanup_failed",
@@ -1936,8 +1939,22 @@ function sessionOf(value: Record<string, unknown>): string | undefined {
   return stringValue(objectValue(value.agent_session).value);
 }
 
-function deterministicName(sessionId: string): string {
-  return `dlg-${sessionId.replaceAll("-", "").slice(0, 28).toLowerCase()}`;
+// Herdr 이름은 32자 제한이라 상주 표시만큼 session ID를 줄인다.
+function agentName(sessionId: string, resident: boolean): string {
+  const id = sessionId.replaceAll("-", "").toLowerCase();
+  return resident ? `dlg-r-${id.slice(0, 26)}` : `dlg-${id.slice(0, 28)}`;
+}
+
+function isResidentName(name: string): boolean {
+  return name.startsWith("dlg-r-");
+}
+
+function isSessionAgentName(
+  name: string | undefined,
+  sessionId: string,
+): boolean {
+  return name === agentName(sessionId, false) ||
+    name === agentName(sessionId, true);
 }
 
 function hasLiveOptionConflict(request: HerdrPrompt, agent: Agent): boolean {

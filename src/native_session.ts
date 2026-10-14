@@ -34,6 +34,8 @@ export type SharedSession = {
   bytes: Uint8Array;
   turns: ParsedTurn[];
   observation: NativeObservation;
+  /** 재개 뒤에도 상주 세션으로 다루기 위한 native 이름 표시 */
+  resident: boolean;
 };
 
 export type PromptOutcome = {
@@ -225,6 +227,7 @@ async function readSnapshot(candidate: Candidate): Promise<SharedSession> {
     },
     turns: parsed.turns,
     observation,
+    resident: parsed.resident === true,
   };
 }
 
