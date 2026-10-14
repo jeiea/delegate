@@ -268,29 +268,7 @@ export async function promptHerdr(
     }
     const deterministic = deterministicName(snapshot.sessionId);
     if (live.name !== deterministic) {
-      try {
-        await withSessionError(
-          json(snapshot.cwd, executionDeps, [
-            "agent",
-            "rename",
-            live.name,
-            deterministic,
-          ]),
-          snapshot.sessionId,
-        );
-      } catch (error) {
-        const normalized = normalizeError(error);
-        if (normalized.code === "cancelled" || normalized.code === "timeout") {
-          throw normalized;
-        }
-        throw new DelegateError(
-          "live_session_ambiguous",
-          normalized.message,
-          undefined,
-          normalized.sessionId,
-          normalized.retry,
-        );
-      }
+      await renameAgent(live.name, deterministic, snapshot, executionDeps);
       live.name = deterministic;
       if (diagnostic != null) {
         diagnostic = { ...diagnostic, name: deterministic };
@@ -356,6 +334,30 @@ export async function promptHerdr(
     throw preserved.code === "cancelled" && !request.detach
       ? await closeCancelledPane(preserved, diagnostic, snapshot, deps)
       : await diagnosePane(preserved, diagnostic, deps);
+  }
+}
+
+async function renameAgent(
+  from: string,
+  to: string,
+  snapshot: SharedSession,
+  deps: HerdrDeps,
+): Promise<void> {
+  try {
+    await withSessionError(
+      json(snapshot.cwd, deps, ["agent", "rename", from, to]),
+      snapshot.sessionId,
+    );
+  } catch (error) {
+    const normalized = normalizeError(error);
+    if (isLifecycleError(normalized)) throw normalized;
+    throw new DelegateError(
+      "live_session_ambiguous",
+      normalized.message,
+      undefined,
+      normalized.sessionId,
+      normalized.retry,
+    );
   }
 }
 
