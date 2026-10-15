@@ -10,8 +10,8 @@
   - 탭을 세션 ID로 명명
   - 에이전트를 부모 세션 ID를 포함해 명명
   - 턴 종료 후 pane 정리
-    - 예외: 숨은 `prompt --detach`로 띄운 상주 세션은 Herdr에서 계속
-      보이도록 `close`로만 정리
+    - 예외: `prompt --detach`로 띄운 상주 세션은 Herdr에서 계속 보이도록
+      `close`로만 정리
       - 표시: Herdr 이름 `dlg-r-`, 재개 대비 native 이름 `[상주]` 접두사
         - 코덱스는 실제 요청 전 첫 입력 `/rename`으로 이름 색인에 기록
 - 중첩 위임은 자식 셸의 `DELEGATE_BUDGET` 남은 단계로 제한

@@ -3418,7 +3418,7 @@ Deno.test("상주 클로드 세션을 분리 요청으로 시작·후속·재개
   assertEquals(marksResident(resumed.fake.calls), true);
 });
 
-Deno.test("분리 요청은 직접 실행과 함께 쓰면 실행 전에 거부되고 스킬·도움말에 드러나지 않는다", async () => {
+Deno.test("분리 요청은 직접 실행과 함께 쓰면 실행 전에 거부되고 알고 쓰는 호출자를 위해 도움말에만 드러난다", async () => {
   await using dir = await createTempDir({ prefix: "delegate-test-" });
   const base = setup(dir.path, "작업");
   for (
@@ -3431,10 +3431,10 @@ Deno.test("분리 요청은 직접 실행과 함께 쓰면 실행 전에 거부�
     assertEquals(result.code, 2, args.join(" "));
     assertStringIncludes(result.stdout, "code: usage");
   }
-  for (const args of [["--skill"], ["prompt", "--help"]]) {
-    const result = await runDelegate(args, base.deps);
-    assertEquals(result.stdout.includes("--detach"), false, args.join(" "));
-  }
+  const skill = await runDelegate(["--skill"], base.deps);
+  assertEquals(skill.stdout.includes("--detach"), false);
+  const help = await runDelegate(["prompt", "--help"], base.deps);
+  assertStringIncludes(help.stdout, "--detach");
   assertEquals(base.fake.calls, []);
 });
 

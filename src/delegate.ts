@@ -210,8 +210,12 @@ function parser() {
         ),
         // 상주 관제 세션 전용. 제출·session ID 확정까지만 기다리고
         // 상주로 표시해 이후 prompt·wait도 pane을 닫지 않는 「턴 종료 후 pane 정리」의
-        // 예외가 된다. 일반 위임이 pane을 쌓지 않도록 스킬 문서와 --help에는 노출하지 않는다.
-        detach: option("--detach", { hidden: true }),
+        // 예외가 된다. 알고 쓰는 호출자가 바로 확인하도록 --help에는 용도를 한정해 보이고,
+        // 일반 위임이 pane을 쌓지 않도록 일반 위임 세션이 읽는 스킬 문서에는 쓰지 않는다.
+        detach: option("--detach", {
+          description:
+            message`상주 관제 세션 전용이며 일반 위임에는 사용 금지. 결과를 기다리지 않으려면 호스트의 백그라운드 실행 사용. Herdr 전송 전용. 제출과 session_id 확인 직후 result 없이 반환. 이후 prompt·wait도 pane을 닫지 않아 호출자가 close로 정리. 위임 단계를 줄이지 않음`,
+        }),
       }),
       {
         brief: message`새 native session 시작 또는 기존 session에 후속 prompt`,
