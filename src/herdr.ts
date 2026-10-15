@@ -75,12 +75,7 @@ type LiveAgent = {
   paneId?: string;
 };
 
-type ManagedPane = LiveAgent & {
-  workspaceId: string;
-  tabId: string;
-  paneId: string;
-  callerId: string;
-};
+type ManagedPane = LiveAgent & { paneId: string };
 
 type OwnedPaneId = string | undefined;
 
@@ -969,13 +964,8 @@ async function startAgent(
   retry?: RetryRecord;
 }> {
   const cwd = request.snapshot?.cwd ?? request.cwd;
-  const { ownership, ...pane } = await allocatePane(
-    cwd,
-    callerId,
-    request.snapshot?.sessionId,
-    deps,
-    (ownership) => allocated(ownership, cwd),
-  );
+  const paneId = await allocatePane(cwd, callerId, deps);
+  allocated(paneId, cwd);
   const name = request.snapshot == null
     ? assignedSessionId == null
       ? `dlg-tmp-${crypto.randomUUID().slice(0, 8)}`
@@ -983,7 +973,7 @@ async function startAgent(
     : agentName(request.snapshot.sessionId, request.resident);
   located({
     name,
-    paneId: pane.paneId,
+    paneId,
     cwd,
     agent: request.invocation.agent,
     sessionId: assignedSessionId ?? request.snapshot?.sessionId,
@@ -1009,7 +999,7 @@ async function startAgent(
       "--kind",
       request.invocation.agent,
       "--pane",
-      pane.paneId,
+      paneId,
       "--timeout",
       activityGateTimeout(deadline, deps),
       "--",
@@ -1026,9 +1016,9 @@ async function startAgent(
     } catch (error) {
       const normalized = normalizeError(error);
       if (
-        ownership == null || normalized.code !== "herdr_failed" ||
+        normalized.code !== "herdr_failed" ||
         normalized.message !==
-          `agent target pane ${pane.paneId} is not an available shell`
+          `agent target pane ${paneId} is not an available shell`
       ) throw normalized;
       const reason = {
         code: "herdr_failed" as const,
@@ -1051,7 +1041,7 @@ async function startAgent(
   }
   started = await acceptClaudeTrust(request, {
     name,
-    paneId: pane.paneId,
+    paneId,
     started,
     deadline,
     deps,
@@ -1081,7 +1071,7 @@ async function startAgent(
   }
   return {
     live: mergeReportedLive({
-      ...pane,
+      paneId,
       name,
       kind: request.invocation.agent,
       cwd,
@@ -1468,17 +1458,39 @@ function agentFromResult(result: HerdrResult, fallbackName: string): LiveAgent {
   );
 }
 
+// 위임마다 새 탭을 만든다. 탭 이름은 사용자가 바꿀 수 있어 재사용 키로 쓰지 않고, 빈 탭은 마지막 pane을 닫을 때 Herdr가 지운다.
 async function allocatePane(
   cwd: string,
   callerId: string,
-  sessionId: string | undefined,
   deps: HerdrDeps,
-  allocated: (ownership: OwnedPaneId) => void,
-): Promise<
-  Pick<ManagedPane, "workspaceId" | "tabId" | "paneId" | "callerId"> & {
-    ownership: OwnedPaneId;
+): Promise<string> {
+  const workspaceId = await callerWorkspaceId(cwd, callerId, deps);
+  const created = await json(cwd, deps, [
+    "tab",
+    "create",
+    "--workspace",
+    workspaceId,
+    "--cwd",
+    cwd,
+    "--label",
+    callerId,
+    "--no-focus",
+  ]);
+  const paneId = stringValue(objectValue(created.root_pane).pane_id);
+  if (paneId == null) {
+    throw new DelegateError(
+      "herdr_failed",
+      "Herdr 탭 생성 응답이 불완전합니다",
+    );
   }
-> {
+  return paneId;
+}
+
+async function callerWorkspaceId(
+  cwd: string,
+  callerId: string,
+  deps: HerdrDeps,
+): Promise<string> {
   let currentResult: HerdrResult;
   try {
     currentResult = await json(cwd, deps, ["pane", "current", "--current"]);
@@ -1513,105 +1525,11 @@ async function allocatePane(
     }
     callerPane = agents[0]!;
   }
-  const location = liveFrom(callerPane);
-  const workspaceId = location.workspaceId;
-  const currentTabId = location.tabId;
-  if (workspaceId == null || currentTabId == null) {
+  const workspaceId = liveFrom(callerPane).workspaceId;
+  if (workspaceId == null) {
     throw new DelegateError("herdr_failed", "현재 Herdr pane 정보가 없습니다");
   }
-  const tabs = await listTabs(workspaceId, cwd, deps);
-  let candidates = tabs.filter((tab) =>
-    tab.label === callerId && tab.tabId !== currentTabId
-  );
-  if (candidates.length > 1 && sessionId != null) {
-    const panes = await listPanes(workspaceId, cwd, deps);
-    const tabIds = new Set(
-      panes.filter((pane) =>
-        isSessionAgentName(pane.agentName ?? undefined, sessionId)
-      ).map((pane) => pane.tabId),
-    );
-    candidates = candidates.filter((tab) => tabIds.has(tab.tabId));
-  }
-  if (candidates.length > 1) {
-    throw new DelegateError(
-      "live_session_ambiguous",
-      "관리 탭 후보가 복수입니다",
-    );
-  }
-  if (candidates.length === 0) {
-    const created = await json(cwd, deps, [
-      "tab",
-      "create",
-      "--workspace",
-      workspaceId,
-      "--cwd",
-      cwd,
-      "--label",
-      callerId,
-      "--no-focus",
-    ]);
-    const tabId = stringValue(objectValue(created.tab).tab_id);
-    const paneId = stringValue(objectValue(created.root_pane).pane_id);
-    if (tabId == null || paneId == null) {
-      throw new DelegateError(
-        "herdr_failed",
-        "Herdr 탭 생성 응답이 불완전합니다",
-      );
-    }
-    const ownership: OwnedPaneId = paneId;
-    allocated(ownership);
-    return {
-      workspaceId,
-      tabId,
-      paneId,
-      callerId,
-      ownership,
-    };
-  }
-  const tabId = candidates[0]!.tabId;
-  const panes = (await listPanes(workspaceId, cwd, deps)).filter((pane) =>
-    pane.tabId === tabId
-  );
-  const available = panes.find((pane) => pane.agentName == null);
-  if (available != null) {
-    const ownership: OwnedPaneId = undefined;
-    allocated(ownership);
-    return {
-      workspaceId,
-      tabId,
-      paneId: available.paneId,
-      callerId,
-      ownership,
-    };
-  }
-  const anchor = panes.at(-1)?.paneId;
-  if (anchor == null) {
-    throw new DelegateError("herdr_failed", "관리 탭에 pane이 없습니다");
-  }
-  const split = await json(cwd, deps, [
-    "pane",
-    "split",
-    "--pane",
-    anchor,
-    "--direction",
-    "right",
-    "--cwd",
-    cwd,
-    "--no-focus",
-  ]);
-  const paneId = stringValue(objectValue(split.pane).pane_id);
-  if (paneId == null) {
-    throw new DelegateError("herdr_failed", "pane 분할 응답이 불완전합니다");
-  }
-  const ownership: OwnedPaneId = paneId;
-  allocated(ownership);
-  return {
-    workspaceId,
-    tabId,
-    paneId,
-    callerId,
-    ownership,
-  };
+  return workspaceId;
 }
 
 async function cleanupOwnedPane(
@@ -1732,42 +1650,6 @@ async function resolveCallerId(
     }
     return undefined;
   }
-}
-
-async function listTabs(workspaceId: string, cwd: string, deps: HerdrDeps) {
-  return arrayObjects(
-    (await json(cwd, deps, [
-      "tab",
-      "list",
-      "--workspace",
-      workspaceId,
-    ])).tabs,
-  ).flatMap((tab) => {
-    const tabId = stringValue(tab.tab_id);
-    return tabId == null ? [] : [{ tabId, label: stringValue(tab.label) }];
-  });
-}
-
-async function listPanes(workspaceId: string, cwd: string, deps: HerdrDeps) {
-  return arrayObjects(
-    (await json(cwd, deps, [
-      "pane",
-      "list",
-      "--workspace",
-      workspaceId,
-    ])).panes,
-  ).flatMap((pane) => {
-    const paneId = stringValue(pane.pane_id);
-    const tabId = stringValue(pane.tab_id);
-    if (paneId == null || tabId == null) return [];
-    return [{
-      paneId,
-      tabId,
-      agentName: stringValue(pane.agent) ?? stringValue(pane.agent_name) ??
-        null,
-      status: stringValue(pane.agent_status) ?? "unknown",
-    }];
-  });
 }
 
 async function closeSessionPane(
