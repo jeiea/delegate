@@ -964,7 +964,7 @@ async function startAgent(
   retry?: RetryRecord;
 }> {
   const cwd = request.snapshot?.cwd ?? request.cwd;
-  const paneId = await allocatePane(cwd, callerId, deps);
+  const paneId = await allocatePane(request, cwd, callerId, deps);
   allocated(paneId, cwd);
   const name = request.snapshot == null
     ? assignedSessionId == null
@@ -1458,29 +1458,44 @@ function agentFromResult(result: HerdrResult, fallbackName: string): LiveAgent {
   );
 }
 
-// 위임마다 새 탭을 만든다. 탭 이름은 사용자가 바꿀 수 있어 재사용 키로 쓰지 않고, 빈 탭은 마지막 pane을 닫을 때 Herdr가 지운다.
+// 상주 세션은 close 전까지 남으므로 호출자 워크스페이스에 쌓이지 않게 새 워크스페이스에, 종속 세션은 호출자 워크스페이스의 새 탭에 띄운다.
+// 탭·워크스페이스 이름은 사용자가 바꿀 수 있어 재사용 키로 쓰지 않고, 비면 마지막 pane을 닫을 때 Herdr가 지운다.
 async function allocatePane(
+  request: HerdrPrompt,
   cwd: string,
   callerId: string,
   deps: HerdrDeps,
 ): Promise<string> {
-  const workspaceId = await callerWorkspaceId(cwd, callerId, deps);
-  const created = await json(cwd, deps, [
-    "tab",
-    "create",
-    "--workspace",
-    workspaceId,
-    "--cwd",
+  const created = await json(
     cwd,
-    "--label",
-    callerId,
-    "--no-focus",
-  ]);
+    deps,
+    request.resident
+      ? [
+        "workspace",
+        "create",
+        "--cwd",
+        cwd,
+        "--label",
+        sessionTitle({ ...request, callerId }),
+        "--no-focus",
+      ]
+      : [
+        "tab",
+        "create",
+        "--workspace",
+        await callerWorkspaceId(cwd, callerId, deps),
+        "--cwd",
+        cwd,
+        "--label",
+        callerId,
+        "--no-focus",
+      ],
+  );
   const paneId = stringValue(objectValue(created.root_pane).pane_id);
   if (paneId == null) {
     throw new DelegateError(
       "herdr_failed",
-      "Herdr 탭 생성 응답이 불완전합니다",
+      "Herdr 탭·워크스페이스 생성 응답이 불완전합니다",
     );
   }
   return paneId;

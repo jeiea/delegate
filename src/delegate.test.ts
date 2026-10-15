@@ -3185,7 +3185,7 @@ Deno.test("클로드 시작에 승인이 필요하면 기록이 생기기 전에
   }
 });
 
-Deno.test("상주 클로드 세션을 분리 요청으로 시작·후속·재개하면 상주 표시와 호출자의 위임 단계를 그대로 넘기고 제출과 세션 확인까지만 기다리며 전달이 불확실하거나 호출자가 중단돼도 패널을 남긴다", async () => {
+Deno.test("상주 클로드 세션을 분리 요청으로 시작·후속·재개하면 새 작업 공간에 띄우고 상주 표시와 호출자의 위임 단계를 그대로 넘기고 제출과 세션 확인까지만 기다리며 전달이 불확실하거나 호출자가 중단돼도 패널을 남긴다", async () => {
   await using dir = await createTempDir({ prefix: "delegate-test-" });
   let now = 0;
   const clock = {
@@ -3215,7 +3215,7 @@ Deno.test("상주 클로드 세션을 분리 요청으로 시작·후속·재개
 
   let id = "";
   const started = setup(dir.path, "원장 점검", [
-    ...newTabAllocation(),
+    ...newWorkspaceAllocation(),
     herdr({ agent: unidentifiedClaude("working", 1) }),
     readyClaudeScreen(),
     herdr({ agent: unidentifiedClaude("working", 1) }, {
@@ -3241,7 +3241,16 @@ Deno.test("상주 클로드 세션을 분리 요청으로 시작·후속·재개
   assertStringIncludes(first.stdout, `session_id: ${id}`);
   assertStringIncludes(first.stdout, "activity: working");
   assertEquals(first.stdout.endsWith("---\n"), true);
-  assertEquals(started.fake.calls.length, 6);
+  assertEquals(started.fake.calls[0]!.args, [
+    "workspace",
+    "create",
+    "--cwd",
+    cwd,
+    "--label",
+    "[상주] resident-caller",
+    "--no-focus",
+  ]);
+  assertEquals(started.fake.calls.length, 5);
   assertEquals(untouchedPane(started.fake.calls), true);
   assertEquals(keepsBudget(started.fake.calls), true);
   assertEquals(marksResident(started.fake.calls), true);
@@ -3276,7 +3285,7 @@ Deno.test("상주 클로드 세션을 분리 요청으로 시작·후속·재개
   const resumeStart = [
     herdr({ agents: [] }),
     herdr({ agents: [] }),
-    ...newTabAllocation(),
+    ...newWorkspaceAllocation(),
     herdr({ agent: residentLive("idle", 3, id) }),
     readyClaudeScreen(),
   ];
@@ -3364,7 +3373,7 @@ Deno.test("코덱스 상주 세션은 실제 요청 전에 상주 이름을 붙�
     );
 
   const started = setup(dir.path, "원장 점검", [
-    ...newTabAllocation(),
+    ...newWorkspaceAllocation(),
     herdr({ agent: unidentifiedAgent("idle", 1) }),
     herdr({}, {
       onStart: () => appendJsonl(index, [entry("[상주] resident-caller")]),
@@ -3393,7 +3402,7 @@ Deno.test("코덱스 상주 세션은 실제 요청 전에 상주 이름을 붙�
   const resumed = setup(dir.path, "재개", [
     herdr({ agents: [] }),
     herdr({ agents: [] }),
-    ...newTabAllocation(),
+    ...newWorkspaceAllocation(),
     herdr({ agent: residentCodex("idle", 3) }),
     herdr({}),
     herdr({ agent: residentCodex("working", 4) }, {
@@ -3411,6 +3420,15 @@ Deno.test("코덱스 상주 세션은 실제 요청 전에 상주 이름을 붙�
   assertStringIncludes(reopened.stdout, "재개 결과");
   const start = resumed.fake.calls.find((call) => call.args[1] === "start")!;
   assertEquals(start.args[2], residentCodex("idle", 3).name);
+  assertEquals(resumed.fake.calls[2]!.args, [
+    "workspace",
+    "create",
+    "--cwd",
+    cwd,
+    "--label",
+    "[상주] resident-caller 마스터",
+    "--no-focus",
+  ]);
   assertEquals(prompts(resumed.fake.calls), [
     `${title} 마스터`,
     "재개",
@@ -3506,7 +3524,7 @@ Deno.test("상주 세션은 일반 요청·대기·재개가 끝나거나 취소
   const resumed = setup(dir.path, "재개", [
     herdr({ agents: [] }),
     herdr({ agents: [] }),
-    ...newTabAllocation(),
+    ...newWorkspaceAllocation(),
     herdr({ agent: residentLive("idle", 4) }),
     readyClaudeScreen(),
     herdr({ agent: residentLive("working", 5) }, {
@@ -5688,6 +5706,16 @@ function newTabAllocation(): FakeResponse[] {
   return [
     herdr({ pane: { workspace_id: "ws-1", tab_id: "current" } }),
     herdr({
+      tab: { tab_id: "tab-delegate" },
+      root_pane: { pane_id: "pane-delegate" },
+    }),
+  ];
+}
+
+function newWorkspaceAllocation(): FakeResponse[] {
+  return [
+    herdr({
+      workspace: { workspace_id: "ws-resident" },
       tab: { tab_id: "tab-delegate" },
       root_pane: { pane_id: "pane-delegate" },
     }),
