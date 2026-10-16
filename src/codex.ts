@@ -29,7 +29,7 @@ export type ParsedSession = {
 };
 
 export function planCodex(request: PlanRequest): NativeInvocation {
-  // 기본 read-only 샌드박스는 네트워크도 막아 조사 중 승인 요청이 잦음
+  // 기본 read-only 샌드박스는 네트워크와 zsh heredoc 임시 파일도 막아 조사 중 승인 요청이 잦음
   const permission = request.permission === "read-only"
     ? [
       "-c",
@@ -38,6 +38,8 @@ export function planCodex(request: PlanRequest): NativeInvocation {
       'permissions.delegate-read-only.extends=":read-only"',
       "-c",
       "permissions.delegate-read-only.network.enabled=true",
+      "-c",
+      'permissions.delegate-read-only.filesystem={":tmpdir"="write",":slash_tmp"="write"}',
     ]
     : ["--approve-for-me"];
   const globals = [

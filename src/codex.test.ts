@@ -53,7 +53,7 @@ function countPair(args: readonly string[], pair: readonly string[]): number {
   );
 }
 
-Deno.test("읽기 전용 Codex는 파일 쓰기만 막고 네트워크 조회는 승인 없이 허용한다", () => {
+Deno.test("읽기 전용 Codex는 임시 파일과 네트워크 사용을 허용하는 권한으로 시작한다", () => {
   const plan = planCodex({
     cwd: "/workspace",
     addDirs: [],
@@ -69,6 +69,7 @@ Deno.test("읽기 전용 Codex는 파일 쓰기만 막고 네트워크 조회는
         'default_permissions="delegate-read-only"',
         'permissions.delegate-read-only.extends=":read-only"',
         "permissions.delegate-read-only.network.enabled=true",
+        'permissions.delegate-read-only.filesystem={":tmpdir"="write",":slash_tmp"="write"}',
       ]
     ) {
       assertEquals(countPair(args, ["-c", value]), 1, value);
