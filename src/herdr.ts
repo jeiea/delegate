@@ -1,4 +1,4 @@
-import { isAbsolute } from "jsr:@std/path@1.1.6";
+import { basename, isAbsolute } from "jsr:@std/path@1.1.6";
 import { TextLineStream } from "jsr:@std/streams@1.0.17/text-line-stream";
 import { closeDirect, statusDirect, waitDirect } from "./direct.ts";
 import type {
@@ -22,6 +22,7 @@ import {
   type PromptOutcome,
   refreshNativeSession,
   sessionIdPattern,
+  sessionsContinuedInto,
   type SharedSession,
 } from "./native_session.ts";
 import type { Exec, ExecResult } from "./process.ts";
@@ -1474,8 +1475,10 @@ async function allocatePane(
   allocated: (paneId: string) => void,
 ): Promise<string> {
   if (request.resident) {
-    const current = await currentPane(cwd, deps);
-    return await createWorkspaceAfter(workspaceOf(current), cwd, deps, {
+    const caller = isBackgroundSession(deps.env)
+      ? await onlyCallerPane(await listAgents(cwd, deps), callerId, cwd, deps)
+      : await currentPane(cwd, deps);
+    return await createWorkspaceAfter(workspaceOf(caller), cwd, deps, {
       label: sessionTitle({ ...request, callerId }),
       allocated,
     });
@@ -1591,35 +1594,153 @@ async function locateCaller(
   callerId: string,
   deps: HerdrDeps,
 ): Promise<{ workspaceId: string; agents: LiveAgent[] }> {
-  const current = await currentPane(cwd, deps);
-  if (!sessionIdPattern.test(callerId)) {
+  const current = isBackgroundSession(deps.env)
+    ? undefined
+    : await currentPane(cwd, deps);
+  if (current != null && !sessionIdPattern.test(callerId)) {
     return { workspaceId: workspaceOf(current), agents: [] };
   }
-  const agents = arrayObjects(
-    (await json(cwd, deps, ["agent", "list"])).agents,
+  const agents = await listAgents(cwd, deps);
+  const caller = current != null &&
+      sessionOf(current)?.toLowerCase() === callerId.toLowerCase()
+    ? current
+    : await onlyCallerPane(agents, callerId, cwd, deps);
+  const workspaceId = workspaceOf(caller);
+  const live = agents.map((agent) => liveFrom(agent));
+  const marks = await callerMarks(callerId, live, workspaceId, deps.env);
+  const siblings = live.filter((agent) =>
+    marks.includes(callerOfAgentName(agent.name) ?? "")
   );
-  const siblings = agents.map((agent) => liveFrom(agent)).filter((agent) =>
-    callerOfAgentName(agent.name) === callerMark(callerId)
-  );
-  if (sessionOf(current)?.toLowerCase() === callerId.toLowerCase()) {
-    return { workspaceId: workspaceOf(current), agents: siblings };
-  }
+  return { workspaceId, agents: siblings };
+}
+
+// 백그라운드로 이어진 세션은 이어 오기 전 ID로 띄운 자식도 같은 호출자로 모은다.
+async function callerMarks(
+  callerId: string,
+  agents: LiveAgent[],
+  workspaceId: string,
+  env: Record<string, string>,
+): Promise<string[]> {
+  const own = callerMark(callerId);
+  if (own == null) return [];
+  if (!isBackgroundSession(env)) return [own];
+  const others = new Set(agents.flatMap((agent) => {
+    const mark = agent.workspaceId === workspaceId
+      ? callerOfAgentName(agent.name)
+      : undefined;
+    return mark == null || mark === own ? [] : [mark];
+  }));
+  return [own, ...await sessionsContinuedInto(callerId, [...others], env)];
+}
+
+// 클로드 백그라운드 세션은 데몬을 처음 띄운 pane의 HERDR_* 환경 변수를 물려받아 현재 pane을 믿을 수 없다.
+// 프로세스의 CLAUDE_CODE_SESSION_KIND=bg는 도구 셸에 전달되지 않아 작업마다 주는 CLAUDE_JOB_DIR로 판정한다.
+function isBackgroundSession(env: Record<string, string>): boolean {
+  return (env.CLAUDE_JOB_DIR ?? "") !== "";
+}
+
+async function listAgents(
+  cwd: string,
+  deps: HerdrDeps,
+): Promise<Record<string, unknown>[]> {
+  return arrayObjects((await json(cwd, deps, ["agent", "list"])).agents);
+}
+
+async function onlyCallerPane(
+  agents: Record<string, unknown>[],
+  callerId: string,
+  cwd: string,
+  deps: HerdrDeps,
+): Promise<Record<string, unknown>> {
   const callerPanes = agents.filter((agent) =>
     sessionOf(agent)?.toLowerCase() === callerId.toLowerCase()
   );
-  if (callerPanes.length === 0) {
-    throw new DelegateError(
-      "caller_session_unavailable",
-      `현재 session의 Herdr pane을 찾을 수 없습니다: ${callerId}`,
-    );
-  }
-  if (callerPanes.length !== 1) {
+  if (callerPanes.length > 1) {
     throw new DelegateError(
       "live_session_ambiguous",
       `현재 session의 Herdr pane이 복수입니다: ${callerId}`,
     );
   }
-  return { workspaceId: workspaceOf(callerPanes[0]!), agents: siblings };
+  if (callerPanes.length === 1) return callerPanes[0]!;
+  const attached = await panesAttachedToJob(agents, cwd, deps);
+  if (attached.length === 1) return attached[0]!;
+  const continued = await panesContinuedInto(callerId, agents, deps.env);
+  if (continued.length === 1) return continued[0]!;
+  throw new DelegateError(
+    "caller_session_unavailable",
+    callerPaneUnavailable(callerId, agents),
+  );
+}
+
+// 클로드 attach 화면은 Herdr에 세션을 보고하지 않아 세션을 모르는 클로드 pane만 붙인 작업 ID로 확인한다.
+async function panesAttachedToJob(
+  agents: Record<string, unknown>[],
+  cwd: string,
+  deps: HerdrDeps,
+): Promise<Record<string, unknown>[]> {
+  const jobDir = deps.env.CLAUDE_JOB_DIR ?? "";
+  if (jobDir === "") return [];
+  const jobId = basename(jobDir);
+  const attached: Record<string, unknown>[] = [];
+  for (const agent of agents) {
+    const { kind, name, paneId } = liveFrom(agent);
+    if (
+      kind !== "claude" || paneId == null || sessionOf(agent) != null ||
+      isDelegatedName(name)
+    ) continue;
+    const info = objectValue(
+      (await json(cwd, deps, ["pane", "process-info", "--pane", paneId]))
+        .process_info,
+    );
+    if (
+      arrayObjects(info.foreground_processes).some((process) =>
+        attachesTo(process, jobId)
+      )
+    ) attached.push(agent);
+  }
+  return attached;
+}
+
+// 백그라운드로 이어진 세션은 새 ID를 받아도 Herdr가 표시 중인 pane에 이전 ID를 보고할 수 있다.
+// 여러 pane이 닿으면 어느 쪽이 이 세션을 표시하는지 알 수 없어 고르지 않는다.
+async function panesContinuedInto(
+  callerId: string,
+  agents: Record<string, unknown>[],
+  env: Record<string, string>,
+): Promise<Record<string, unknown>[]> {
+  const candidates = callerCandidates(agents);
+  const origins = await sessionsContinuedInto(
+    callerId,
+    candidates.map((agent) => sessionOf(agent)!),
+    env,
+  );
+  return candidates.filter((agent) => origins.includes(sessionOf(agent)!));
+}
+
+function attachesTo(process: Record<string, unknown>, jobId: string): boolean {
+  const argv = Array.isArray(process.argv) ? process.argv : [];
+  const index = argv.indexOf("attach");
+  return index >= 0 && argv[index + 1] === jobId;
+}
+
+function callerPaneUnavailable(
+  callerId: string,
+  agents: Record<string, unknown>[],
+): string {
+  const candidates = callerCandidates(agents).map((agent) => {
+    const live = liveFrom(agent);
+    const title = stringValue(agent.terminal_title_stripped);
+    return `- ${live.paneId} session=${live.sessionId} cwd=${live.cwd}${
+      title == null ? "" : ` title=${title}`
+    }`;
+  });
+  return [
+    `현재 session의 Herdr pane을 찾을 수 없습니다: ${callerId}`,
+    "이 session을 표시하는 pane이 후보에 있으면 --caller-id <session ID>로 지정합니다.",
+    "이 우회가 필요했다면 유저에게 delegate 스킬·도구 개선을 문의합니다.",
+    "후보 pane:",
+    ...(candidates.length === 0 ? ["- 없음"] : candidates),
+  ].join("\n");
 }
 
 async function currentPane(
@@ -2039,6 +2160,19 @@ function callerOfAgentName(name: string): string | undefined {
 
 function compactId(sessionId: string): string {
   return sessionId.replaceAll("-", "").toLowerCase();
+}
+
+// 위임으로 띄운 종속 세션은 호출자가 아니므로 후보에서 뺀다.
+function callerCandidates(
+  agents: Record<string, unknown>[],
+): Record<string, unknown>[] {
+  return agents.filter((agent) =>
+    sessionOf(agent) != null && !isDelegatedName(stringValue(agent.name))
+  );
+}
+
+function isDelegatedName(name: string | undefined): boolean {
+  return name != null && name.startsWith("dlg-") && !isResidentName(name);
 }
 
 function isResidentName(name: string): boolean {

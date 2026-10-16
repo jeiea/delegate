@@ -70,22 +70,40 @@ export async function findNativeSession(
   env: Record<string, string>,
 ): Promise<SharedSession> {
   assertSessionId(sessionId);
-  const candidates = (await listCandidates(env)).filter((candidate) =>
-    candidateId(candidate) === sessionId.toLowerCase()
+  return await readSnapshot(
+    onlyCandidate(sessionId, await listCandidates(env)),
   );
-  if (candidates.length === 0) {
-    throw new DelegateError(
-      "session_not_found",
-      `native session 없음: ${sessionId}`,
+}
+
+// 클로드는 세션을 백그라운드로 넘기면 새 ID로 이어 가고 원래 기록에만 continued-in을 남긴다.
+// origins는 세션 ID 또는 delegate 호출자 표시처럼 하이픈을 뺀 앞부분이며 기록 하나로만 정해져야 한다.
+export async function sessionsContinuedInto(
+  sessionId: string,
+  origins: string[],
+  env: Record<string, string>,
+): Promise<string[]> {
+  if (origins.length === 0) return [];
+  const candidates = (await listCandidates(env)).filter((candidate) =>
+    candidate.agent === "claude"
+  );
+  const target = sessionId.toLowerCase();
+  const reaches = async (id: string, seen: Set<string>): Promise<boolean> => {
+    if (seen.has(id)) return false;
+    seen.add(id);
+    for (const next of await continuedSessionIds(id, candidates)) {
+      if (next === target || await reaches(next, seen)) return true;
+    }
+    return false;
+  };
+  const reached = await Promise.all(origins.map((origin) => {
+    const prefix = compactId(origin);
+    const matched = candidates.filter((candidate) =>
+      compactId(candidateId(candidate)).startsWith(prefix)
     );
-  }
-  if (candidates.length > 1) {
-    throw new DelegateError(
-      "session_ambiguous",
-      `native session 후보 복수: ${sessionId}`,
-    );
-  }
-  return await readSnapshot(candidates[0]!);
+    return matched.length === 1 &&
+      reaches(candidateId(matched[0]!), new Set());
+  }));
+  return origins.filter((_, index) => reached[index]);
 }
 
 export async function refreshNativeSession(
@@ -153,15 +171,50 @@ export function renderConversation(snapshot: SharedSession): string {
   ]).join("\n\n");
 }
 
-async function readSnapshot(candidate: Candidate): Promise<SharedSession> {
-  const root = await realPathOrSelf(candidate.root);
-  const path = await realPathOrSelf(candidate.path);
-  if (!inside(root, path)) {
+// 이어짐은 자동 선택 근거라 findNativeSession과 같은 유일성·경로 검증을 통과한 기록만 쓴다.
+async function continuedSessionIds(
+  sessionId: string,
+  candidates: Candidate[],
+): Promise<string[]> {
+  let records: NativeRecord[];
+  try {
+    const path = await trustedPath(onlyCandidate(sessionId, candidates));
+    records = decodeRecords(await Deno.readFile(path)).records;
+  } catch (error) {
+    if (error instanceof DelegateError) return [];
+    throw error;
+  }
+  return records.map(({ value }) => object(value)).flatMap((record) =>
+    record.type === "continued-in" &&
+      typeof record.sessionId === "string" &&
+      record.sessionId.toLowerCase() === sessionId &&
+      typeof record.continuedInSessionId === "string"
+      ? [record.continuedInSessionId.toLowerCase()]
+      : []
+  );
+}
+
+function onlyCandidate(sessionId: string, candidates: Candidate[]): Candidate {
+  const matched = candidates.filter((candidate) =>
+    candidateId(candidate) === sessionId.toLowerCase()
+  );
+  if (matched.length === 0) {
     throw new DelegateError(
-      "unsafe_native_path",
-      `native session 경로가 신뢰 root 밖입니다: ${basename(candidate.path)}`,
+      "session_not_found",
+      `native session 없음: ${sessionId}`,
     );
   }
+  if (matched.length > 1) {
+    throw new DelegateError(
+      "session_ambiguous",
+      `native session 후보 복수: ${sessionId}`,
+    );
+  }
+  return matched[0]!;
+}
+
+async function readSnapshot(candidate: Candidate): Promise<SharedSession> {
+  const path = await trustedPath(candidate);
   const data = await Deno.readFile(path);
   const { records, partial } = decodeRecords(data);
   let parsed: ParsedSession;
@@ -388,6 +441,10 @@ async function walkJsonl(root: string): Promise<string[]> {
   return paths;
 }
 
+function compactId(sessionId: string): string {
+  return sessionId.replaceAll("-", "").toLowerCase();
+}
+
 function candidateId(candidate: Candidate): string {
   const name = basename(candidate.path, ".jsonl").toLowerCase();
   return candidate.agent === "claude" ? name : name.slice(-36);
@@ -396,6 +453,18 @@ function candidateId(candidate: Candidate): string {
 function inside(root: string, path: string): boolean {
   return path === root ||
     path.startsWith(root.endsWith(SEPARATOR) ? root : root + SEPARATOR);
+}
+
+async function trustedPath(candidate: Candidate): Promise<string> {
+  const root = await realPathOrSelf(candidate.root);
+  const path = await realPathOrSelf(candidate.path);
+  if (!inside(root, path)) {
+    throw new DelegateError(
+      "unsafe_native_path",
+      `native session 경로가 신뢰 root 밖입니다: ${basename(candidate.path)}`,
+    );
+  }
+  return path;
 }
 
 async function realPathOrSelf(path: string): Promise<string> {

@@ -400,6 +400,179 @@ Deno.test("현재 코덱스 작업 공간을 찾지 못하면 위임을 거부�
   ]);
 });
 
+Deno.test("백그라운드 클로드 세션이 보이는 패널을 찾지 못하면 후보 패널과 호출자 지정·개선 문의를 안내하고 검증되는 이어짐 기록이 패널 하나로만 닿으면 그 작업 공간에서 이어 오기 전 위임과 같은 탭을 나눠 띄우고 이 작업을 붙여 보는 패널은 기록보다 우선해 상주 위임 기준으로 삼는다", async () => {
+  await using dir = await createTempDir({ prefix: "delegate-test-" });
+  const backgroundId = "11111111-2222-4333-8444-555555555555";
+  const viewerId = "22222222-3333-4444-8555-666666666666";
+  const otherId = "33333333-4444-4555-8666-777777777777";
+  const forkedId = "44444444-5555-4666-8777-888888888888";
+  const forgedId = "55555555-6666-4777-8888-999999999999";
+  const env = {
+    HERDR_ENV: "1",
+    HERDR_PANE_ID: "pane-daemon-origin",
+    CLAUDECODE: "1",
+    CLAUDE_CODE_SESSION_ID: backgroundId,
+    CLAUDE_JOB_DIR: "/jobs/11111111",
+  };
+  const continuedIn = (from: string, to: string) =>
+    writeJsonl(claudePath(dir.path, from), [
+      { type: "continued-in", sessionId: from, continuedInSessionId: to },
+    ]);
+  const viewer = {
+    agent: "claude",
+    agent_session: { kind: "id", value: viewerId },
+    pane_id: "pane-viewer",
+    tab_id: "tab-viewer",
+    workspace_id: "ws-viewer",
+    cwd,
+    terminal_title_stripped: "스타일 분리 기준",
+  };
+  const forged = {
+    ...viewer,
+    agent_session: { kind: "id", value: forgedId },
+    pane_id: "pane-forged",
+  };
+  const other = {
+    ...viewer,
+    agent_session: { kind: "id", value: otherId },
+    pane_id: "pane-other",
+    tab_id: "tab-other",
+    workspace_id: "ws-other",
+    terminal_title_stripped: "다른 작업",
+  };
+  const preForkChild = {
+    agent: "codex",
+    agent_session: { kind: "id", value: codexId },
+    name: `dlg-333333334444-${codexId.replaceAll("-", "").slice(0, 15)}`,
+    pane_id: "pane-prefork",
+    tab_id: "tab-prefork",
+    workspace_id: "ws-other",
+    cwd,
+  };
+  const attached = {
+    agent: "claude",
+    agent_session: null,
+    pane_id: "pane-attached",
+    tab_id: "tab-attached",
+    workspace_id: "ws-attached",
+    cwd,
+  };
+  const foreground = (argv: string[]) =>
+    herdr({ process_info: { foreground_processes: [{ argv }] } });
+  const resident = {
+    agent: "claude",
+    agent_session: { kind: "id", value: claudeId },
+    name: `dlg-r-${claudeId.replaceAll("-", "").slice(0, 26)}`,
+    pane_id: "pane-resident",
+    tab_id: "tab-resident",
+    workspace_id: "ws-resident",
+    cwd,
+  };
+  const child = {
+    agent: "codex",
+    agent_session: { kind: "id", value: codexId },
+    name: `dlg-222222223333-${codexId.replaceAll("-", "").slice(0, 15)}`,
+    pane_id: "pane-child",
+    tab_id: "tab-viewer",
+    workspace_id: "ws-viewer",
+    cwd,
+  };
+
+  const missing = setup(dir.path, "검토 요청", [
+    herdr({ agents: [viewer, resident, child] }),
+  ], { env });
+  const rejected = await runDelegate(
+    ["prompt", "--agent", "codex"],
+    missing.deps,
+  );
+  assertEquals(rejected.code, 3, rejected.stdout);
+  assertStringIncludes(rejected.stdout, "code: caller_session_unavailable");
+  for (
+    const shown of [
+      "pane-viewer",
+      viewerId,
+      `cwd=${cwd}`,
+      "스타일 분리 기준",
+      "--caller-id",
+      "스킬·도구 개선",
+      "pane-resident",
+    ]
+  ) assertStringIncludes(rejected.stdout, shown);
+  assertEquals(rejected.stdout.includes("pane-child"), false);
+  assertEquals(missing.fake.calls.map(({ args }) => args), [["agent", "list"]]);
+
+  continuedIn(viewerId, backgroundId);
+  continuedIn(otherId, forkedId);
+  continuedIn(forkedId, backgroundId);
+  const ambiguous = setup(dir.path, "검토 요청", [
+    herdr({ agents: [viewer, other] }),
+  ], { env });
+  const undecided = await runDelegate(
+    ["prompt", "--agent", "codex"],
+    ambiguous.deps,
+  );
+  assertEquals(undecided.code, 3, undecided.stdout);
+  assertStringIncludes(undecided.stdout, "code: caller_session_unavailable");
+  assertEquals(ambiguous.fake.calls.length, 1);
+
+  Deno.removeSync(claudePath(dir.path, viewerId));
+  writeJsonl(claudePath(dir.path, forgedId), [{
+    type: "continued-in",
+    sessionId: viewerId,
+    continuedInSessionId: backgroundId,
+  }]);
+  const responses = completedHerdrResponses(
+    codexPath(dir.path),
+    `${prefix}검토 요청`,
+  );
+  responses[0] = herdr({ agents: [viewer, forged, other, preForkChild] });
+  responses[1] = herdr({ pane: { pane_id: "pane-delegate" } });
+  const finished = herdr({
+    agent: {
+      ...liveAgent("done", 2),
+      name: `dlg-111111112222-${codexId.replaceAll("-", "").slice(0, 15)}`,
+    },
+  });
+  responses.splice(5, 2, finished, finished);
+  const recovered = setup(dir.path, "검토 요청", responses, { env });
+  const result = await runDelegate(
+    ["prompt", "--agent", "codex"],
+    recovered.deps,
+  );
+  assertEquals(result.code, 0, result.stdout);
+  assertEquals(recovered.fake.calls.slice(0, 2).map(({ args }) => args), [
+    ["agent", "list"],
+    [
+      "pane",
+      "split",
+      "--pane",
+      "pane-prefork",
+      "--direction",
+      "right",
+      "--cwd",
+      cwd,
+      "--no-focus",
+    ],
+  ]);
+
+  const anchored = setup(dir.path, "원장 점검", [
+    herdr({ agents: [viewer, other, attached] }),
+    foreground(["claude.exe", "attach", "11111111"]),
+    herdr({ workspace: { workspace_id: "ws-attached", number: 1 } }),
+    herdrFailure("workspace create failed"),
+  ], { env });
+  const detached = await runDelegate(
+    ["prompt", "--agent", "claude", "--detach"],
+    anchored.deps,
+  );
+  assertEquals(detached.code, 5, detached.stdout);
+  assertEquals(anchored.fake.calls.slice(0, 3).map(({ args }) => args), [
+    ["agent", "list"],
+    ["pane", "process-info", "--pane", "pane-attached"],
+    ["workspace", "get", "ws-attached"],
+  ]);
+});
+
 Deno.test("같은 세션이 이어서 위임하면 사용자가 패널을 옮겼어도 앞선 위임이 가장 많이 모인 탭을 나눠 띄우고 호출자가 드러나는 이름을 붙인다", async () => {
   await using dir = await createTempDir({ prefix: "delegate-test-" });
   const callerId = "11111111-2222-4333-8444-555555555555";
