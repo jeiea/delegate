@@ -3086,9 +3086,7 @@ Deno.test("클로드 신뢰 수락 중 취소되거나 전체 시간이 만료�
       const code = interruption === "cancelled" ? "cancelled" : "timeout";
       assertEquals(result.code, exitCode(code), result.stdout);
       assertStringIncludes(result.stdout, `code: ${code}`);
-      const start = test.fake.calls.find((call) => call.args[1] === "start")!;
-      const id = start.args.find((arg) => arg.startsWith("--session-id="))!
-        .slice(13);
+      const id = assignedSessionId(test.fake.calls);
       assertStringIncludes(result.stdout, `session_id: ${id}`);
       assertEquals(test.fake.calls.at(-1)?.args, [
         "pane",
@@ -3142,11 +3140,7 @@ Deno.test("클로드는 시작 화면에 폴더 신뢰 확인이 보이면 권�
       readyClaudeScreen(),
       herdr({ agent: unidentifiedClaude("working", 2) }, {
         onStart: () => {
-          const start = test.fake.calls.find((call) =>
-            call.args[1] === "start"
-          )!;
-          const id = start.args.find((arg) => arg.startsWith("--session-id="))!
-            .slice(13);
+          const id = assignedSessionId(test.fake.calls);
           writeJsonl(claudePath(dir.path, id), [
             ...claudeOpen(`${prefix}작업`, id),
             {
@@ -3282,13 +3276,7 @@ Deno.test("클로드 세션이 허더에서 클로드 작업을 시작하면 호
     readyClaudeScreen(),
     herdr({ agent: unidentifiedClaude("working", 1) }, {
       onStart: () => {
-        const start = test.fake.calls.find((call) => call.args[1] === "start");
-        const assignedId = start?.args.find((arg) =>
-          arg.startsWith("--session-id=")
-        )?.slice("--session-id=".length);
-        if (assignedId == null) {
-          throw new Error("Claude start에 --session-id가 없습니다");
-        }
+        const assignedId = assignedSessionId(test.fake.calls);
         writeJsonl(claudePath(dir.path, assignedId), [
           ...claudeOpen(`${prefix}화면 작업`, assignedId),
           {
@@ -3344,17 +3332,15 @@ Deno.test("클로드 세션이 허더에서 클로드 작업을 시작하면 호
   const start = test.fake.calls.find((call) => call.args[1] === "start");
   assertEquals(start?.args.includes("--name=caller-claude 화면"), true);
   assertEquals(start?.args.includes("--effort=high"), true);
-  const assignedId = start?.args.find((arg) => arg.startsWith("--session-id="))
-    ?.slice("--session-id=".length);
-  assertEquals(assignedId == null, false);
+  const assignedId = assignedSessionId(test.fake.calls);
   assertStringIncludes(started.stdout, `session_id: ${assignedId}`);
 
   const conflictSetup = setup(dir.path, "후속", [
-    herdr({ agents: [claudeLive("idle", 3, assignedId!)] }),
+    herdr({ agents: [claudeLive("idle", 3, assignedId)] }),
   ], { env: { HERDR_ENV: "1" } });
   const conflict = await runDelegate([
     "prompt",
-    assignedId!,
+    assignedId,
     "--caller-id",
     "caller-claude",
     "--name",
@@ -3365,7 +3351,7 @@ Deno.test("클로드 세션이 허더에서 클로드 작업을 시작하면 호
 
   const waitName = await runDelegate([
     "wait",
-    assignedId!,
+    assignedId,
     "--name",
     "새 이름",
   ], conflictSetup.deps);
@@ -3399,14 +3385,10 @@ Deno.test("클로드 세션이 허더에서 클로드 작업을 시작하면 호
   ], mismatch.deps);
   assertEquals(mismatched.code, 5);
   assertStringIncludes(mismatched.stdout, "code: session_id_changed");
-  const mismatchedStart = mismatch.fake.calls.find((call) =>
-    call.args[1] === "start"
+  assertStringIncludes(
+    mismatched.stdout,
+    assignedSessionId(mismatch.fake.calls),
   );
-  const mismatchedAssignedId = mismatchedStart?.args.find((arg) =>
-    arg.startsWith("--session-id=")
-  )?.slice("--session-id=".length);
-  assertEquals(mismatchedAssignedId == null, false);
-  assertStringIncludes(mismatched.stdout, mismatchedAssignedId!);
   assertStringIncludes(mismatched.stdout, claudeId);
   assertEquals(
     mismatch.fake.calls.some((call) => call.args[1] === "prompt"),
@@ -3444,9 +3426,7 @@ Deno.test("클로드 시작에 승인이 필요하면 기록이 생기기 전에
     "caller",
   ], started.deps);
   const start = started.fake.calls.find((call) => call.args[1] === "start")!;
-  const id = start.args.find((arg) => arg.startsWith("--session-id="))!.slice(
-    13,
-  );
+  const id = assignedSessionId(started.fake.calls);
   assertEquals(start.args[2], `dlg-${id.replaceAll("-", "").slice(0, 28)}`);
   assertStringIncludes(first.stdout, `session_id: ${id}`);
   assertStringIncludes(first.stdout, "pane_id: pane-delegate");
@@ -3533,11 +3513,7 @@ Deno.test("상주 클로드 세션을 분리 요청으로 시작·후속·재개
     readyClaudeScreen(),
     herdr({ agent: unidentifiedClaude("working", 1) }, {
       onStart: () => {
-        const start = started.fake.calls.find((call) =>
-          call.args[1] === "start"
-        )!;
-        id = start.args.find((arg) => arg.startsWith("--session-id="))!
-          .slice("--session-id=".length);
+        id = assignedSessionId(started.fake.calls);
         writeJsonl(
           claudePath(dir.path, id),
           claudeOpen("원장 점검", id),
@@ -5897,6 +5873,15 @@ function codexPath(root: string, id = codexId) {
     "16",
     `rollout-anon-${id}.jsonl`,
   );
+}
+
+// 클로드는 delegate가 정한 session ID로 시작하므로 start 인자에서 꺼낸다.
+function assignedSessionId(calls: readonly { args: string[] }[]): string {
+  const id = calls.find((call) => call.args[1] === "start")?.args
+    .find((arg) => arg.startsWith("--session-id="))
+    ?.slice("--session-id=".length);
+  if (id == null) throw new Error("Claude start에 --session-id가 없습니다");
+  return id;
 }
 
 function claudePath(root: string, id = claudeId) {
