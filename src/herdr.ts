@@ -265,8 +265,12 @@ export async function promptHerdr(
     if (expected == null) {
       await executionDeps.stdout?.(renderSessionHead(snapshot.sessionId));
     }
-    const deterministic = agentName(snapshot.sessionId, resident);
-    if (live.name !== deterministic) {
+    // 실행 중인 세션은 처음 띄운 호출자 표시를 유지한다.
+    if (!isSessionAgentName(live.name, snapshot.sessionId)) {
+      const deterministic = agentName(snapshot.sessionId, {
+        resident,
+        callerId,
+      });
       await renameAgent(live.name, deterministic, snapshot, executionDeps);
       live.name = deterministic;
       if (diagnostic != null) {
@@ -966,11 +970,10 @@ async function startAgent(
   const cwd = request.snapshot?.cwd ?? request.cwd;
   const paneId = await allocatePane(request, cwd, callerId, deps);
   allocated(paneId, cwd);
-  const name = request.snapshot == null
-    ? assignedSessionId == null
-      ? `dlg-tmp-${crypto.randomUUID().slice(0, 8)}`
-      : agentName(assignedSessionId, request.resident)
-    : agentName(request.snapshot.sessionId, request.resident);
+  const sessionId = request.snapshot?.sessionId ?? assignedSessionId;
+  const name = sessionId == null
+    ? temporaryAgentName(callerId)
+    : agentName(sessionId, { ...request, callerId });
   located({
     name,
     paneId,
@@ -1458,19 +1461,18 @@ function agentFromResult(result: HerdrResult, fallbackName: string): LiveAgent {
   );
 }
 
-// 상주 세션은 close 전까지 남으므로 호출자 워크스페이스에 쌓이지 않게 새 워크스페이스에, 종속 세션은 호출자 워크스페이스의 새 탭에 띄운다.
-// 탭·워크스페이스 이름은 사용자가 바꿀 수 있어 재사용 키로 쓰지 않고, 비면 마지막 pane을 닫을 때 Herdr가 지운다.
+// 상주 세션은 close 전까지 남으므로 호출자 워크스페이스에 쌓이지 않게 새 워크스페이스에 띄운다.
+// 종속 세션은 호출자 워크스페이스에서 같은 호출자의 종속 세션이 가장 많은 탭을 분할하고, 없으면 새 탭에 띄운다.
+// 탭·워크스페이스 이름은 사용자가 바꿀 수 있어 Herdr 에이전트 이름의 호출자 표시로 찾고, 비면 마지막 pane을 닫을 때 Herdr가 지운다.
 async function allocatePane(
   request: HerdrPrompt,
   cwd: string,
   callerId: string,
   deps: HerdrDeps,
 ): Promise<string> {
-  const created = await json(
-    cwd,
-    deps,
-    request.resident
-      ? [
+  if (request.resident) {
+    return rootPaneOf(
+      await json(cwd, deps, [
         "workspace",
         "create",
         "--cwd",
@@ -1478,19 +1480,45 @@ async function allocatePane(
         "--label",
         sessionTitle({ ...request, callerId }),
         "--no-focus",
-      ]
-      : [
+      ]),
+    );
+  }
+  const caller = await locateCaller(cwd, callerId, deps);
+  const anchor = siblingPaneInBusiestTab(caller.workspaceId, caller.agents);
+  if (anchor == null) {
+    return rootPaneOf(
+      await json(cwd, deps, [
         "tab",
         "create",
         "--workspace",
-        await callerWorkspaceId(cwd, callerId, deps),
+        caller.workspaceId,
         "--cwd",
         cwd,
         "--label",
         callerId,
         "--no-focus",
-      ],
-  );
+      ]),
+    );
+  }
+  const split = await json(cwd, deps, [
+    "pane",
+    "split",
+    "--pane",
+    anchor,
+    "--direction",
+    "right",
+    "--cwd",
+    cwd,
+    "--no-focus",
+  ]);
+  const paneId = stringValue(objectValue(split.pane).pane_id);
+  if (paneId == null) {
+    throw new DelegateError("herdr_failed", "pane 분할 응답이 불완전합니다");
+  }
+  return paneId;
+}
+
+function rootPaneOf(created: HerdrResult): string {
   const paneId = stringValue(objectValue(created.root_pane).pane_id);
   if (paneId == null) {
     throw new DelegateError(
@@ -1501,11 +1529,31 @@ async function allocatePane(
   return paneId;
 }
 
-async function callerWorkspaceId(
+// pane 수가 같은 탭끼리는 어느 탭이든 상관없다.
+function siblingPaneInBusiestTab(
+  workspaceId: string,
+  siblings: LiveAgent[],
+): string | undefined {
+  const byTab = Map.groupBy(
+    siblings.filter((sibling) =>
+      sibling.workspaceId === workspaceId && sibling.tabId != null &&
+      sibling.paneId != null
+    ),
+    (sibling) => sibling.tabId,
+  );
+  const busiest = [...byTab.values()].reduce<LiveAgent[]>(
+    (most, panes) => panes.length > most.length ? panes : most,
+    [],
+  );
+  return busiest.at(-1)?.paneId;
+}
+
+// 세션 ID가 아닌 호출자는 에이전트 이름에 표시하지 않아 분할할 탭을 찾지 않는다.
+async function locateCaller(
   cwd: string,
   callerId: string,
   deps: HerdrDeps,
-): Promise<string> {
+): Promise<{ workspaceId: string; agents: LiveAgent[] }> {
   let currentResult: HerdrResult;
   try {
     currentResult = await json(cwd, deps, ["pane", "current", "--current"]);
@@ -1516,31 +1564,38 @@ async function callerWorkspaceId(
     throw error;
   }
   const current = objectValue(currentResult.pane);
-  let callerPane = current;
-  if (
-    sessionIdPattern.test(callerId) &&
-    sessionOf(current)?.toLowerCase() !== callerId.toLowerCase()
-  ) {
-    const agents = arrayObjects(
-      (await json(cwd, deps, ["agent", "list"])).agents,
-    ).filter((agent) =>
-      sessionOf(agent)?.toLowerCase() === callerId.toLowerCase()
-    );
-    if (agents.length === 0) {
-      throw new DelegateError(
-        "caller_session_unavailable",
-        `현재 session의 Herdr pane을 찾을 수 없습니다: ${callerId}`,
-      );
-    }
-    if (agents.length !== 1) {
-      throw new DelegateError(
-        "live_session_ambiguous",
-        `현재 session의 Herdr pane이 복수입니다: ${callerId}`,
-      );
-    }
-    callerPane = agents[0]!;
+  if (!sessionIdPattern.test(callerId)) {
+    return { workspaceId: workspaceOf(current), agents: [] };
   }
-  const workspaceId = liveFrom(callerPane).workspaceId;
+  const agents = arrayObjects(
+    (await json(cwd, deps, ["agent", "list"])).agents,
+  );
+  const siblings = agents.map((agent) => liveFrom(agent)).filter((agent) =>
+    callerOfAgentName(agent.name) === callerMark(callerId)
+  );
+  if (sessionOf(current)?.toLowerCase() === callerId.toLowerCase()) {
+    return { workspaceId: workspaceOf(current), agents: siblings };
+  }
+  const callerPanes = agents.filter((agent) =>
+    sessionOf(agent)?.toLowerCase() === callerId.toLowerCase()
+  );
+  if (callerPanes.length === 0) {
+    throw new DelegateError(
+      "caller_session_unavailable",
+      `현재 session의 Herdr pane을 찾을 수 없습니다: ${callerId}`,
+    );
+  }
+  if (callerPanes.length !== 1) {
+    throw new DelegateError(
+      "live_session_ambiguous",
+      `현재 session의 Herdr pane이 복수입니다: ${callerId}`,
+    );
+  }
+  return { workspaceId: workspaceOf(callerPanes[0]!), agents: siblings };
+}
+
+function workspaceOf(pane: Record<string, unknown>): string {
+  const workspaceId = liveFrom(pane).workspaceId;
   if (workspaceId == null) {
     throw new DelegateError("herdr_failed", "현재 Herdr pane 정보가 없습니다");
   }
@@ -1863,10 +1918,39 @@ function sessionOf(value: Record<string, unknown>): string | undefined {
   return stringValue(objectValue(value.agent_session).value);
 }
 
-// Herdr 이름은 32자 제한이라 상주 표시만큼 session ID를 줄인다.
-function agentName(sessionId: string, resident: boolean): string {
-  const id = sessionId.replaceAll("-", "").toLowerCase();
-  return resident ? `dlg-r-${id.slice(0, 26)}` : `dlg-${id.slice(0, 28)}`;
+// Herdr 이름은 32자 제한이라 상주·호출자 표시만큼 session ID를 줄인다.
+// 호출자 표시는 같은 호출자의 종속 세션을 한 탭에 모으는 기준이다.
+function agentName(
+  sessionId: string,
+  options: { resident: boolean; callerId?: string },
+): string {
+  const id = compactId(sessionId);
+  if (options.resident) return `dlg-r-${id.slice(0, 26)}`;
+  const caller = callerMark(options.callerId);
+  return caller == null
+    ? `dlg-${id.slice(0, 28)}`
+    : `dlg-${caller}-${id.slice(0, 15)}`;
+}
+
+// 코덱스는 시작 뒤에야 session ID가 확정되므로 그 전에 시작하는 다른 위임도 같은 탭을 찾도록 호출자를 표시한다.
+function temporaryAgentName(callerId: string): string {
+  const caller = callerMark(callerId);
+  const random = crypto.randomUUID().slice(0, 8);
+  return caller == null ? `dlg-tmp-${random}` : `dlg-tmp-${caller}-${random}`;
+}
+
+function callerMark(callerId: string | undefined): string | undefined {
+  return callerId != null && sessionIdPattern.test(callerId)
+    ? compactId(callerId).slice(0, 12)
+    : undefined;
+}
+
+function callerOfAgentName(name: string): string | undefined {
+  return /^dlg-(?:tmp-)?([0-9a-f]{12})-[0-9a-f]+$/.exec(name)?.[1];
+}
+
+function compactId(sessionId: string): string {
+  return sessionId.replaceAll("-", "").toLowerCase();
 }
 
 function isResidentName(name: string): boolean {
@@ -1877,8 +1961,9 @@ function isSessionAgentName(
   name: string | undefined,
   sessionId: string,
 ): boolean {
-  return name === agentName(sessionId, false) ||
-    name === agentName(sessionId, true);
+  const shown = /^dlg-(?:r-|[0-9a-f]{12}-)?([0-9a-f]{15,})$/.exec(name ?? "")
+    ?.[1];
+  return shown != null && compactId(sessionId).startsWith(shown);
 }
 
 function hasLiveOptionConflict(request: HerdrPrompt, agent: Agent): boolean {

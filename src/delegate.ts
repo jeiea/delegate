@@ -196,7 +196,7 @@ function parser() {
         )),
         callerId: optional(option("--caller-id", string({ metavar: "ID" }), {
           description:
-            message`호출자 세션 ID. 관리 탭 이름과 표시 이름 접두사. 생략 시 CODEX_THREAD_ID·CLAUDE_CODE_SESSION_ID 순으로 자동`,
+            message`호출자 세션 ID. 종속 세션을 한 탭에 모으는 기준, 새 탭 이름, 표시 이름 접두사. 생략 시 CODEX_THREAD_ID·CLAUDE_CODE_SESSION_ID 순으로 자동`,
         })),
         name: optional(option("--name", string({ metavar: "NAME" }), {
           description:

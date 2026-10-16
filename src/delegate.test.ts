@@ -1,4 +1,8 @@
-import { assertEquals, assertStringIncludes } from "jsr:@std/assert@1.0.19";
+import {
+  assertEquals,
+  assertMatch,
+  assertStringIncludes,
+} from "jsr:@std/assert@1.0.19";
 import { join } from "jsr:@std/path@1.1.6";
 import { createTempDir } from "jsr:@jeiea/snippets@0.2.0";
 import { runDelegate } from "./delegate.ts";
@@ -358,6 +362,13 @@ Deno.test("현재 코덱스 작업 공간을 찾지 못하면 위임을 거부�
       }],
     }),
   );
+  const finished = herdr({
+    agent: {
+      ...liveAgent("done", 2),
+      name: `dlg-111111112222-${codexId.replaceAll("-", "").slice(0, 15)}`,
+    },
+  });
+  responses.splice(6, 2, finished, finished);
   const test = setup(dir.path, "검토 요청", responses, {
     env: { HERDR_ENV: "1", CODEX_THREAD_ID: callerId },
   });
@@ -389,22 +400,146 @@ Deno.test("현재 코덱스 작업 공간을 찾지 못하면 위임을 거부�
   ]);
 });
 
-Deno.test("진행 중인 코덱스 작업에 후속 요청을 보내면 같은 세션의 최신 결과와 로그를 확인하고 정리를 마친다", async () => {
+Deno.test("같은 세션이 이어서 위임하면 사용자가 패널을 옮겼어도 앞선 위임이 가장 많이 모인 탭을 나눠 띄우고 호출자가 드러나는 이름을 붙인다", async () => {
+  await using dir = await createTempDir({ prefix: "delegate-test-" });
+  const callerId = "11111111-2222-4333-8444-555555555555";
+  const path = codexPath(dir.path);
+  const delegated = (
+    name: string,
+    paneId: string,
+    tabId: string,
+    workspaceId = "ws-1",
+  ) => ({
+    name,
+    agent: "codex",
+    pane_id: paneId,
+    tab_id: tabId,
+    workspace_id: workspaceId,
+  });
+  const sessionName = `dlg-111111112222-${
+    codexId.replaceAll("-", "").slice(0, 15)
+  }`;
+  const finished = { ...liveAgent("done", 2), name: sessionName };
+  const test = setup(dir.path, "검토 요청", [
+    herdr({
+      pane: {
+        workspace_id: "ws-1",
+        tab_id: "tab-caller",
+        agent_session: { kind: "id", value: callerId },
+      },
+    }),
+    herdr({
+      agents: [
+        delegated(
+          "dlg-111111112222-aaaaaaaaaaaaaaa",
+          "pane-moved",
+          "tab-moved",
+        ),
+        delegated("dlg-tmp-111111112222-bbbbbbbb", "pane-first", "tab-review"),
+        delegated(
+          "dlg-111111112222-ccccccccccccccc",
+          "pane-second",
+          "tab-review",
+        ),
+        delegated(
+          "dlg-r-dddddddddddddddddddddddddd",
+          "pane-r1",
+          "tab-resident",
+        ),
+        delegated(
+          "dlg-r-eeeeeeeeeeeeeeeeeeeeeeeeee",
+          "pane-r2",
+          "tab-resident",
+        ),
+        delegated(
+          "dlg-r-ffffffffffffffffffffffffff",
+          "pane-r3",
+          "tab-resident",
+        ),
+        delegated("dlg-999999999999-111111111111111", "pane-o1", "tab-other"),
+        delegated("dlg-999999999999-222222222222222", "pane-o2", "tab-other"),
+        delegated("dlg-999999999999-333333333333333", "pane-o3", "tab-other"),
+        delegated(
+          "dlg-111111112222-444444444444444",
+          "pane-w1",
+          "tab-w",
+          "ws-2",
+        ),
+        delegated(
+          "dlg-111111112222-555555555555555",
+          "pane-w2",
+          "tab-w",
+          "ws-2",
+        ),
+        delegated(
+          "dlg-111111112222-666666666666666",
+          "pane-w3",
+          "tab-w",
+          "ws-2",
+        ),
+      ],
+    }),
+    herdr({ pane: { pane_id: "pane-delegate" } }),
+    herdr({ agent: currentAgent("working", 1) }),
+    herdr({ agent: currentAgent("working", 1) }, {
+      onStart: () =>
+        writeJsonl(path, [
+          codexMeta(),
+          ...codexTurn("turn", `${prefix}검토 요청`, "완료"),
+        ]),
+    }),
+    herdr({}),
+    herdr({ agent: finished }),
+    herdr({ agent: finished }),
+    herdr({}),
+  ], { env: { HERDR_ENV: "1", CODEX_THREAD_ID: callerId } });
+
+  const result = await runDelegate([
+    "prompt",
+    "--agent",
+    "codex",
+    "--timeout",
+    "60s",
+  ], test.deps);
+
+  assertEquals(result.code, 0);
+  assertStringIncludes(result.stdout, "\n\n완료\n");
+  const calls = test.fake.calls.map(({ args }) => args);
+  assertEquals(calls.slice(0, 2), [
+    ["pane", "current", "--current"],
+    ["agent", "list"],
+  ]);
+  const [command, splitTarget] = [calls[2]!.slice(0, 2), calls[2]![3]];
+  assertEquals(command, ["pane", "split"]);
+  assertEquals(["pane-first", "pane-second"].includes(splitTarget!), true);
+  const temporary = calls[3]![2]!;
+  assertMatch(temporary, /^dlg-tmp-111111112222-[0-9a-f]{8}$/);
+  assertEquals(
+    calls.find((args) => args[1] === "rename"),
+    ["agent", "rename", temporary, sessionName],
+  );
+});
+
+Deno.test("진행 중인 코덱스 작업에 후속 요청을 보내면 처음 띄운 호출자 표시를 유지하고 같은 세션의 최신 결과와 로그를 확인하고 정리를 마친다", async () => {
   await using dir = await createTempDir({ prefix: "delegate-test-" });
   const path = codexPath(dir.path);
   const firstPrompt = `${prefix}첫 요청`;
   writeJsonl(path, [codexMeta(), ...codexTurn("turn-1", firstPrompt)]);
   let now = 0;
   let followUpWritten = false;
+  const marked = (status: string, sequence: number) => ({
+    ...liveAgent(status, sequence),
+    name: `dlg-111111112222-${codexId.replaceAll("-", "").slice(0, 15)}`,
+  });
   const responses: FakeResponse[] = [
-    herdr({ agents: [liveAgent("working", 1)] }),
-    herdr({ agents: [liveAgent("working", 1)] }),
+    herdr({ agents: [marked("working", 1)] }),
+    herdr({ agents: [marked("working", 1)] }),
     herdr({ agent: currentAgent("working", 2) }),
-    herdr({ agent: liveAgent("done", 2) }),
-    herdr({ agent: liveAgent("done", 2) }),
+    herdr({ agent: marked("done", 2) }),
+    herdr({ agent: marked("done", 2) }),
     herdr({}),
-    herdr({ agents: [liveAgent("done", 2)] }),
-    herdr({ agent: liveAgent("done", 3) }, {
+    herdr({ agents: [marked("done", 2)] }),
+    herdr({ agent: marked("done", 3) }, {
       onStart: () => {
         const replacement = `${path}.replacement`;
         writeJsonl(replacement, [
@@ -420,7 +555,7 @@ Deno.test("진행 중인 코덱스 작업에 후속 요청을 보내면 같은 �
     }),
     herdr({
       agent: {
-        ...liveAgent("done", 3),
+        ...marked("done", 3),
         workspace_id: "ws-2",
         tab_id: "tab-moved",
         pane_id: "pane-moved",
@@ -474,6 +609,10 @@ Deno.test("진행 중인 코덱스 작업에 후속 요청을 보내면 같은 �
     call.args[1] === "prompt" && call.args[3] === "후속 요청"
   );
   assertEquals(followUp?.args.includes("--wait"), false);
+  assertEquals(
+    start.fake.calls.some((call) => call.args[1] === "rename"),
+    false,
+  );
 
   const waited = await runDelegate([
     "wait",
