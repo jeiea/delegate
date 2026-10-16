@@ -7,7 +7,7 @@ import { join } from "jsr:@std/path@1.1.6";
 import { createTempDir } from "jsr:@jeiea/snippets@0.2.0";
 import { runDelegate } from "./delegate.ts";
 import { exitCode } from "./document.ts";
-import { fakeExec, type FakeResponse } from "./fakes.ts";
+import { fakeExec, fakeHerdrSocket, type FakeResponse } from "./fakes.ts";
 import { claudeTrustKeys } from "./herdr.ts";
 import { denoExec } from "./process.ts";
 
@@ -3324,8 +3324,9 @@ Deno.test("클로드 시작에 승인이 필요하면 기록이 생기기 전에
   }
 });
 
-Deno.test("상주 클로드 세션을 분리 요청으로 시작·후속·재개하면 새 작업 공간에 띄우고 상주 표시와 호출자의 위임 단계를 그대로 넘기고 제출과 세션 확인까지만 기다리며 전달이 불확실하거나 호출자가 중단돼도 패널을 남긴다", async () => {
+Deno.test("상주 클로드 세션을 분리 요청으로 시작·후속·재개하면 현재 작업 공간 바로 다음의 새 작업 공간에 띄우고 상주 표시와 호출자의 위임 단계를 그대로 넘기고 제출과 세션 확인까지만 기다리며 전달이 불확실하거나 호출자가 중단돼도 패널을 남긴다", async () => {
   await using dir = await createTempDir({ prefix: "delegate-test-" });
+  await using socket = fakeHerdrSocket(join(dir.path, "herdr.sock"));
   let now = 0;
   const clock = {
     now: () => now,
@@ -3380,16 +3381,27 @@ Deno.test("상주 클로드 세션을 분리 요청으로 시작·후속·재개
   assertStringIncludes(first.stdout, `session_id: ${id}`);
   assertStringIncludes(first.stdout, "activity: working");
   assertEquals(first.stdout.endsWith("---\n"), true);
-  assertEquals(started.fake.calls[0]!.args, [
-    "workspace",
-    "create",
-    "--cwd",
-    cwd,
-    "--label",
-    "[상주] resident-caller",
-    "--no-focus",
+  assertEquals(started.fake.calls.slice(0, 3).map(({ args }) => args), [
+    ["pane", "current", "--current"],
+    ["workspace", "get", "ws-caller"],
+    [
+      "workspace",
+      "create",
+      "--cwd",
+      cwd,
+      "--label",
+      "[상주] resident-caller",
+      "--no-focus",
+    ],
   ]);
-  assertEquals(started.fake.calls.length, 5);
+  assertEquals(
+    socket.requests.map(({ method, params }) => ({ method, params })),
+    [{
+      method: "workspace.move",
+      params: { workspace_id: "ws-resident", insert_index: 2 },
+    }],
+  );
+  assertEquals(started.fake.calls.length, 7);
   assertEquals(untouchedPane(started.fake.calls), true);
   assertEquals(keepsBudget(started.fake.calls), true);
   assertEquals(marksResident(started.fake.calls), true);
@@ -3463,6 +3475,43 @@ Deno.test("상주 클로드 세션을 분리 요청으로 시작·후속·재개
   assertEquals(marksResident(resumed.fake.calls), true);
 });
 
+Deno.test("상주 세션의 새 작업 공간을 옮기지 못하면 빈 패널을 닫고 그사이 호출자가 중단하면 기다리지 않고 중단을 알리며 상주 패널처럼 남긴다", async () => {
+  await using dir = await createTempDir({ prefix: "delegate-test-" });
+  const controller = new AbortController();
+  await using _socket = fakeHerdrSocket(join(dir.path, "herdr.sock"), [
+    { error: { code: "workspace_move_failed", message: "이동 거부" } },
+    { hang: true, onRequest: () => controller.abort() },
+  ]);
+  const env = { HERDR_ENV: "1" };
+  const args = [
+    "prompt",
+    "--agent",
+    "claude",
+    "--caller-id",
+    "resident-caller",
+    "--detach",
+  ];
+  const closesPane = (calls: { args: string[] }[]) =>
+    calls.some((call) => call.args.join(" ") === "pane close pane-delegate");
+
+  const rejected = setup(dir.path, "원장 점검", [
+    ...newWorkspaceAllocation(),
+    herdr({}),
+  ], { env });
+  const failure = await runDelegate(args, rejected.deps);
+  assertEquals(failure.code, exitCode("herdr_failed"), failure.stdout);
+  assertStringIncludes(failure.stdout, "이동 거부");
+  assertEquals(closesPane(rejected.fake.calls), true);
+
+  const interrupted = setup(dir.path, "원장 점검", [
+    ...newWorkspaceAllocation(),
+    herdr({}),
+  ], { env, signal: controller.signal });
+  const cancelled = await runDelegate(args, interrupted.deps);
+  assertEquals(cancelled.code, 130, cancelled.stdout);
+  assertEquals(closesPane(interrupted.fake.calls), false);
+});
+
 Deno.test("분리 요청은 직접 실행과 함께 쓰면 실행 전에 거부되고 알고 쓰는 호출자를 위해 도움말에만 드러난다", async () => {
   await using dir = await createTempDir({ prefix: "delegate-test-" });
   const base = setup(dir.path, "작업");
@@ -3485,6 +3534,7 @@ Deno.test("분리 요청은 직접 실행과 함께 쓰면 실행 전에 거부�
 
 Deno.test("코덱스 상주 세션은 실제 요청 전에 상주 이름을 붙여 시작하고 이름을 바꾼 뒤 일반 요청으로 재개해도 패널을 남긴다", async () => {
   await using dir = await createTempDir({ prefix: "delegate-test-" });
+  await using _socket = fakeHerdrSocket(join(dir.path, "herdr.sock"));
   const rollout = codexPath(dir.path);
   const index = join(dir.path, "codex", "session_index.jsonl");
   const entry = (thread_name: string) => ({
@@ -3559,7 +3609,7 @@ Deno.test("코덱스 상주 세션은 실제 요청 전에 상주 이름을 붙�
   assertStringIncludes(reopened.stdout, "재개 결과");
   const start = resumed.fake.calls.find((call) => call.args[1] === "start")!;
   assertEquals(start.args[2], residentCodex("idle", 3).name);
-  assertEquals(resumed.fake.calls[2]!.args, [
+  assertEquals(resumed.fake.calls[4]!.args, [
     "workspace",
     "create",
     "--cwd",
@@ -3578,6 +3628,7 @@ Deno.test("코덱스 상주 세션은 실제 요청 전에 상주 이름을 붙�
 
 Deno.test("상주 세션은 일반 요청·대기·재개가 끝나거나 취소돼도 호출자와 같은 위임 단계로 패널을 남기고 닫기 요청으로만 정리된다", async () => {
   await using dir = await createTempDir({ prefix: "delegate-test-" });
+  await using _socket = fakeHerdrSocket(join(dir.path, "herdr.sock"));
   const path = claudePath(dir.path);
   const title = {
     type: "custom-title",
@@ -5853,6 +5904,8 @@ function newTabAllocation(): FakeResponse[] {
 
 function newWorkspaceAllocation(): FakeResponse[] {
   return [
+    herdr({ pane: { workspace_id: "ws-caller", tab_id: "current" } }),
+    herdr({ workspace: { workspace_id: "ws-caller", number: 2 } }),
     herdr({
       workspace: { workspace_id: "ws-resident" },
       tab: { tab_id: "tab-delegate" },

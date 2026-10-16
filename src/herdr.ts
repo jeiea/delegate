@@ -1,4 +1,5 @@
 import { isAbsolute } from "jsr:@std/path@1.1.6";
+import { TextLineStream } from "jsr:@std/streams@1.0.17/text-line-stream";
 import { closeDirect, statusDirect, waitDirect } from "./direct.ts";
 import type {
   DelegateDocument,
@@ -968,19 +969,20 @@ async function startAgent(
   retry?: RetryRecord;
 }> {
   const cwd = request.snapshot?.cwd ?? request.cwd;
-  const paneId = await allocatePane(request, cwd, callerId, deps);
-  allocated(paneId, cwd);
   const sessionId = request.snapshot?.sessionId ?? assignedSessionId;
   const name = sessionId == null
     ? temporaryAgentName(callerId)
     : agentName(sessionId, { ...request, callerId });
-  located({
-    name,
-    paneId,
-    cwd,
-    agent: request.invocation.agent,
-    sessionId: assignedSessionId ?? request.snapshot?.sessionId,
-    strictPane: true,
+  const paneId = await allocatePane(request, cwd, callerId, deps, (paneId) => {
+    allocated(paneId, cwd);
+    located({
+      name,
+      paneId,
+      cwd,
+      agent: request.invocation.agent,
+      sessionId: assignedSessionId ?? request.snapshot?.sessionId,
+      strictPane: true,
+    });
   });
   const herdrArgs = request.invocation.agent === "claude"
     ? [
@@ -1461,7 +1463,7 @@ function agentFromResult(result: HerdrResult, fallbackName: string): LiveAgent {
   );
 }
 
-// 상주 세션은 close 전까지 남으므로 호출자 워크스페이스에 쌓이지 않게 새 워크스페이스에 띄운다.
+// 상주 세션은 close 전까지 남으므로 호출자 워크스페이스에 쌓이지 않게 현재 워크스페이스 바로 다음의 새 워크스페이스에 띄운다.
 // 종속 세션은 호출자 워크스페이스에서 같은 호출자의 종속 세션이 가장 많은 탭을 분할하고, 없으면 새 탭에 띄운다.
 // 탭·워크스페이스 이름은 사용자가 바꿀 수 있어 Herdr 에이전트 이름의 호출자 표시로 찾고, 비면 마지막 pane을 닫을 때 Herdr가 지운다.
 async function allocatePane(
@@ -1469,20 +1471,25 @@ async function allocatePane(
   cwd: string,
   callerId: string,
   deps: HerdrDeps,
+  allocated: (paneId: string) => void,
 ): Promise<string> {
   if (request.resident) {
-    return rootPaneOf(
-      await json(cwd, deps, [
-        "workspace",
-        "create",
-        "--cwd",
-        cwd,
-        "--label",
-        sessionTitle({ ...request, callerId }),
-        "--no-focus",
-      ]),
-    );
+    const current = await currentPane(cwd, deps);
+    return await createWorkspaceAfter(workspaceOf(current), cwd, deps, {
+      label: sessionTitle({ ...request, callerId }),
+      allocated,
+    });
   }
+  const paneId = await openPaneInCallerWorkspace(cwd, callerId, deps);
+  allocated(paneId);
+  return paneId;
+}
+
+async function openPaneInCallerWorkspace(
+  cwd: string,
+  callerId: string,
+  deps: HerdrDeps,
+): Promise<string> {
   const caller = await locateCaller(cwd, callerId, deps);
   const anchor = siblingPaneInBusiestTab(caller.workspaceId, caller.agents);
   if (anchor == null) {
@@ -1515,6 +1522,36 @@ async function allocatePane(
   if (paneId == null) {
     throw new DelegateError("herdr_failed", "pane 분할 응답이 불완전합니다");
   }
+  return paneId;
+}
+
+// Herdr는 새 워크스페이스를 맨 끝에 만들고 0.9.3 CLI로는 옮길 수 없어 소켓의 workspace.move를 쓴다.
+// 이동이 실패하거나 중단돼도 기존 정리가 pane을 닫도록 이동 전에 알린다.
+async function createWorkspaceAfter(
+  workspaceId: string,
+  cwd: string,
+  deps: HerdrDeps,
+  options: { label: string; allocated: (paneId: string) => void },
+): Promise<string> {
+  const anchor = objectValue(
+    (await json(cwd, deps, ["workspace", "get", workspaceId])).workspace,
+  );
+  const created = await json(cwd, deps, [
+    "workspace",
+    "create",
+    "--cwd",
+    cwd,
+    "--label",
+    options.label,
+    "--no-focus",
+  ]);
+  const paneId = rootPaneOf(created);
+  options.allocated(paneId);
+  // number는 1부터 세므로 그대로 바로 다음 삽입 위치다.
+  await socketRequest(deps, "workspace.move", {
+    workspace_id: objectValue(created.workspace).workspace_id,
+    insert_index: anchor.number,
+  });
   return paneId;
 }
 
@@ -1554,16 +1591,7 @@ async function locateCaller(
   callerId: string,
   deps: HerdrDeps,
 ): Promise<{ workspaceId: string; agents: LiveAgent[] }> {
-  let currentResult: HerdrResult;
-  try {
-    currentResult = await json(cwd, deps, ["pane", "current", "--current"]);
-  } catch (error) {
-    if (error instanceof DelegateError && error.code === "herdr_failed") {
-      throw new DelegateError("transport_unavailable", error.message);
-    }
-    throw error;
-  }
-  const current = objectValue(currentResult.pane);
+  const current = await currentPane(cwd, deps);
   if (!sessionIdPattern.test(callerId)) {
     return { workspaceId: workspaceOf(current), agents: [] };
   }
@@ -1592,6 +1620,22 @@ async function locateCaller(
     );
   }
   return { workspaceId: workspaceOf(callerPanes[0]!), agents: siblings };
+}
+
+async function currentPane(
+  cwd: string,
+  deps: HerdrDeps,
+): Promise<Record<string, unknown>> {
+  try {
+    return objectValue(
+      (await json(cwd, deps, ["pane", "current", "--current"])).pane,
+    );
+  } catch (error) {
+    if (error instanceof DelegateError && error.code === "herdr_failed") {
+      throw new DelegateError("transport_unavailable", error.message);
+    }
+    throw error;
+  }
 }
 
 function workspaceOf(pane: Record<string, unknown>): string {
@@ -1822,6 +1866,50 @@ async function json(
       "Herdr JSON 응답을 해석할 수 없습니다",
     );
   }
+}
+
+// CLI의 소켓 클라이언트와 같은 줄 단위 JSON 요청·응답을 쓴다.
+async function socketRequest(
+  deps: HerdrDeps,
+  method: string,
+  params: Record<string, unknown>,
+): Promise<HerdrResult> {
+  const signal = executionSignal(deps);
+  let response: Record<string, unknown>;
+  try {
+    const conn = await Deno.connect({
+      transport: "unix",
+      path: deps.env.HERDR_SOCKET_PATH!,
+    });
+    const lines = conn.readable.pipeThrough(new TextDecoderStream())
+      .pipeThrough(new TextLineStream()).getReader();
+    const close = () => void lines.cancel();
+    signal.addEventListener("abort", close, { once: true });
+    try {
+      signal.throwIfAborted();
+      await conn.write(
+        new TextEncoder().encode(
+          `${JSON.stringify({ id: `delegate:${method}`, method, params })}\n`,
+        ),
+      );
+      response = objectValue(JSON.parse((await lines.read()).value ?? ""));
+    } finally {
+      signal.removeEventListener("abort", close);
+      await lines.cancel();
+    }
+  } catch (error) {
+    throw interruptionError(deps) ?? new DelegateError(
+      "herdr_failed",
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+  if (response.error != null) {
+    throw new DelegateError(
+      "herdr_failed",
+      stringValue(objectValue(response.error).message) ?? "Herdr 요청 실패",
+    );
+  }
+  return objectValue(response.result);
 }
 
 function parseCommandError(stderr: string): { code: string; message: string } {

@@ -1,7 +1,7 @@
 {
   "tasks": {
     "check": "deno check src/delegate.ts src/delegate.test.ts src/codex.test.ts",
-    "test": "deno test --allow-read --allow-write --allow-env --allow-run=git,jj src/",
+    "test": "deno test --allow-read --allow-write --allow-env --allow-net --allow-run=git,jj src/",
     "verify": {
       "dependencies": ["check", "test"]
     }
