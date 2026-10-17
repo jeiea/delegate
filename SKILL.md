@@ -31,6 +31,7 @@ allowed-tools: Bash(herdr *) Bash(deno run *)
   - herdr 예외는 `herdr --skill` 확인
 - 호스트 도구가 백그라운드 실행 ID를 반환하면 그 실행을 기다려 최종 출력·종료
   상태 확인
+  - 완료 알림이 와도 출력의 프런트매터를 닫는 두 번째 `---`가 없으면 미종료
 - `herdr agent` 직접 조립·원본 기록 조회는 스크립트 결함 조사에 한정
 
 ```sh
