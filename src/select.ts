@@ -50,26 +50,12 @@ export function delegationBudget(env: Record<string, string>): number {
   return Number(value);
 }
 
-/** 강제는 자식 셸의 남은 단계 수가 맡고, 문구는 더 위임할 수 없는 세션에 알리기만 한다 */
-export function delegationGuard(request: PlanRequest): string {
-  return request.budget === 0 ? delegatePromptPrefix : "";
-}
-
 export type NativeInvocation = {
   agent: Agent;
   directArgs: string[];
   herdrArgs: string[];
   prompt: string;
 };
-
-export const delegatePromptPrefix =
-  "delegate 스킬 등 다른 에이전트 재위임 금지.\n\n";
-
-export function stripDelegatePromptPrefix(prompt: string): string {
-  return prompt.startsWith(delegatePromptPrefix)
-    ? prompt.slice(delegatePromptPrefix.length)
-    : prompt;
-}
 
 export function selectAgent(
   prompt: string,

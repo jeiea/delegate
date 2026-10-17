@@ -12,11 +12,7 @@ import {
   type NativeObservation,
   type NativeSessionId,
 } from "./document.ts";
-import {
-  type Agent,
-  residentTitleMarker,
-  stripDelegatePromptPrefix,
-} from "./select.ts";
+import { type Agent, residentTitleMarker } from "./select.ts";
 
 export const sessionIdPattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -145,7 +141,7 @@ export function outcomeAfter(
   const concluded = turns.slice(0, resultIndex + 1);
   const interveningPrompts = concluded.slice(
     boundary.excludeInitialTurn ? 1 : 0,
-  ).map((turn) => stripDelegatePromptPrefix(turn.prompt));
+  ).map((turn) => turn.prompt);
   return {
     ...(interveningPrompts.length === 0
       ? {}

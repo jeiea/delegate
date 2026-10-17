@@ -1,7 +1,6 @@
 import type { ParsedAgentOutput, ParsedSession } from "./codex.ts";
 import {
   budgetVariable,
-  delegationGuard,
   type NativeInvocation,
   type PlanRequest,
   sessionTitle,
@@ -44,7 +43,7 @@ export function planClaude(request: PlanRequest): NativeInvocation {
       "-",
     ],
     herdrArgs: shared,
-    prompt: delegationGuard(request) + request.prompt,
+    prompt: request.prompt,
   };
 }
 

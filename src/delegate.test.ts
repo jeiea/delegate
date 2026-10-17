@@ -15,7 +15,6 @@ import { denoExec } from "./process.ts";
 const codexId = "019efcf8-381f-74a2-a141-f105f1e00e81";
 const claudeId = "c627ecae-f35d-40b1-b5fb-b2b109a52e89";
 const cwd = "/workspace";
-const prefix = "delegate 스킬 등 다른 에이전트 재위임 금지.\n\n";
 
 // Herdr codex prompt
 
@@ -159,7 +158,7 @@ Deno.test("연결 실패 진단에서 확인된 코덱스 세션으로 요청을
       });
       writeJsonl(codexPath(dir.path), [
         codexMeta(),
-        ...codexTurn("late", `${prefix}작업`, "늦게 연결된 작업 완료"),
+        ...codexTurn("late", "작업", "늦게 연결된 작업 완료"),
       ]);
     };
     const first = await runDelegate([
@@ -337,7 +336,7 @@ Deno.test("현재 코덱스 작업 공간을 찾지 못하면 위임을 거부�
   ]);
 
   const path = codexPath(dir.path);
-  const responses = completedHerdrResponses(path, `${prefix}검토 요청`);
+  const responses = completedHerdrResponses(path, "검토 요청");
   responses[0] = herdr({
     pane: {
       workspace_id: "ws-1",
@@ -524,7 +523,7 @@ Deno.test("백그라운드 클로드 세션이 보이는 패널을 찾지 못하
   }]);
   const responses = completedHerdrResponses(
     codexPath(dir.path),
-    `${prefix}검토 요청`,
+    "검토 요청",
   );
   responses[0] = herdr({ agents: [viewer, forged, other, preForkChild] });
   responses[1] = herdr({ pane: { pane_id: "pane-delegate" } });
@@ -659,7 +658,7 @@ Deno.test("같은 세션이 이어서 위임하면 사용자가 패널을 옮겼
       onStart: () =>
         writeJsonl(path, [
           codexMeta(),
-          ...codexTurn("turn", `${prefix}검토 요청`, "완료"),
+          ...codexTurn("turn", "검토 요청", "완료"),
         ]),
     }),
     herdr({}),
@@ -697,7 +696,7 @@ Deno.test("같은 세션이 이어서 위임하면 사용자가 패널을 옮겼
 Deno.test("진행 중인 코덱스 작업에 후속 요청을 보내면 처음 띄운 호출자 표시를 유지하고 같은 세션의 최신 결과와 로그를 확인하고 정리를 마친다", async () => {
   await using dir = await createTempDir({ prefix: "delegate-test-" });
   const path = codexPath(dir.path);
-  const firstPrompt = `${prefix}첫 요청`;
+  const firstPrompt = "첫 요청";
   writeJsonl(path, [codexMeta(), ...codexTurn("turn-1", firstPrompt)]);
   let now = 0;
   let followUpWritten = false;
@@ -720,7 +719,7 @@ Deno.test("진행 중인 코덱스 작업에 후속 요청을 보내면 처음 �
           codexMeta(),
           ...codexTurn(
             "turn-2",
-            `${prefix}수동 후속 요청`,
+            "수동 후속 요청",
             "최신 완료 결과",
           ),
         ]);
@@ -752,7 +751,7 @@ Deno.test("진행 중인 코덱스 작업에 후속 요청을 보내면 처음 �
           },
           ...codexTurn(
             "turn-follow-up",
-            `${prefix}후속 요청`,
+            "후속 요청",
             "후속 결과",
           ),
         ]);
@@ -899,7 +898,7 @@ Deno.test("종료된 코덱스 작업을 재개하면 같은 세션에서 결과
       onStart: () =>
         appendJsonl(
           path,
-          codexTurn("resumed", `${prefix}수정 요청`, "재개 결과"),
+          codexTurn("resumed", "수정 요청", "재개 결과"),
         ),
     }),
     herdr({ agent: unidentifiedAgent("working", 1) }),
@@ -976,7 +975,7 @@ Deno.test("종료된 코덱스 작업을 재개하면 같은 세션에서 결과
           codexMeta(changedId, sessionCwd),
           ...codexTurn(
             "changed",
-            `${prefix}다른 ID로 바뀌면 안 됩니다`,
+            "다른 ID로 바뀌면 안 됩니다",
           ),
         ]),
     }),
@@ -1017,7 +1016,7 @@ Deno.test("종료된 코덱스 작업을 재개하면 같은 세션에서 결과
       onStart: () =>
         appendJsonl(
           replacementPath,
-          codexTurn("after-replace", `${prefix}교체 후 요청`),
+          codexTurn("after-replace", "교체 후 요청"),
         ),
     }),
     herdr({ agent: liveAgent("done", 2, replacementId) }, {
@@ -1027,7 +1026,7 @@ Deno.test("종료된 코덱스 작업을 재개하면 같은 세션에서 결과
           codexMeta(replacementId),
           ...codexTurn(
             "after-replace",
-            `${prefix}교체 후 요청`,
+            "교체 후 요청",
             "교체 후 결과",
           ),
         ]);
@@ -1083,7 +1082,7 @@ Deno.test("실행 중인 작업의 권한·추론 강도를 바꾸면 거부하�
         appendJsonl(codexPath(dir.path), [{
           type: "event_msg",
           payload: { type: "turn_aborted", turn_id: "old" },
-        }, ...codexTurn("next", `${prefix}후속`, "후속 완료")]),
+        }, ...codexTurn("next", "후속", "후속 완료")]),
     }),
     herdr({ agent: liveAgent("done", 2) }),
     herdr({ agent: liveAgent("done", 2) }),
@@ -1128,7 +1127,7 @@ Deno.test("실행 중인 작업의 권한·추론 강도를 바꾸면 거부하�
 Deno.test("작업 중 사람이 요청을 추가하고 패널을 옮기면 최신 결과와 추가 요청을 반환하고 옮긴 패널을 닫는다", async () => {
   await using dir = await createTempDir({ prefix: "delegate-test-" });
   const path = codexPath(dir.path);
-  const sent = `${prefix}첫 요청`;
+  const sent = "첫 요청";
   let now = 0;
   let sleeps = 0;
   const test = setup(dir.path, "첫 요청", [
@@ -1167,7 +1166,7 @@ Deno.test("작업 중 사람이 요청을 추가하고 패널을 옮기면 최�
       if (sleeps === 1) {
         appendJsonl(
           path,
-          codexTurn("turn-2", `${prefix}수동 요청`, "최신 결과"),
+          codexTurn("turn-2", "수동 요청", "최신 결과"),
         );
       }
       return Promise.resolve();
@@ -1185,7 +1184,6 @@ Deno.test("작업 중 사람이 요청을 추가하고 패널을 옮기면 최�
     result.stdout,
     "intervening_prompts:\n  - 수동 요청",
   );
-  assertEquals(result.stdout.includes(prefix), false);
   assertStringIncludes(result.stdout, "\n\n최신 결과\n");
   assertEquals(
     test.fake.calls.filter((call) => call.args[1] === "wait").length,
@@ -1204,7 +1202,7 @@ Deno.test("작업 중 사람이 요청을 추가하고 패널을 옮기면 최�
 Deno.test("사용자 응답을 기다리는 작업은 즉시 차단을 알리고 응답 뒤에는 호출자 ID 없이 대기·정리를 마친다", async () => {
   await using dir = await createTempDir({ prefix: "delegate-test-" });
   const path = codexPath(dir.path);
-  const sent = `${prefix}승인 필요`;
+  const sent = "승인 필요";
   let sleeps = 0;
   const test = setup(dir.path, "승인 필요", [
     herdr({ pane: { workspace_id: "ws-1", tab_id: "current" } }),
@@ -1280,8 +1278,8 @@ Deno.test("두 위임을 동시에 요청해도 각자 작업을 마치고 결�
   await using firstDir = await createTempDir({ prefix: "delegate-test-" });
   await using secondDir = await createTempDir({ prefix: "delegate-test-" });
   const socketPath = join(firstDir.path, "shared-herdr.sock");
-  const firstPrompt = `${prefix}첫 작업`;
-  const secondPrompt = `${prefix}둘째 작업`;
+  const firstPrompt = "첫 작업";
+  const secondPrompt = "둘째 작업";
   const firstStart = Promise.withResolvers<void>();
   const releaseFirst = Promise.withResolvers<void>();
   const secondWaiting = Promise.withResolvers<void>();
@@ -1365,7 +1363,7 @@ Deno.test("같은 중단 세션을 동시에 재개하면 먼저 시작한 요�
       onStart: () =>
         appendJsonl(
           path,
-          codexTurn("resumed", `${prefix}첫 재개`, "첫 결과"),
+          codexTurn("resumed", "첫 재개", "첫 결과"),
         ),
     }),
     herdr({ agent: liveAgent("done", 2) }, {
@@ -1436,7 +1434,7 @@ Deno.test("먼저 끝난 위임을 정리하는 동안 새 위임을 요청해�
     "첫 작업",
     completedHerdrResponses(
       codexPath(firstDir.path),
-      `${prefix}첫 작업`,
+      "첫 작업",
       {
         onCleanupStart: async () => {
           cleanupStarted.resolve();
@@ -1449,7 +1447,7 @@ Deno.test("먼저 끝난 위임을 정리하는 동안 새 위임을 요청해�
   const second = setup(
     secondDir.path,
     "둘째 작업",
-    completedHerdrResponses(codexPath(secondDir.path), `${prefix}둘째 작업`),
+    completedHerdrResponses(codexPath(secondDir.path), "둘째 작업"),
     {
       env: { HERDR_ENV: "1", HERDR_SOCKET_PATH: socketPath },
       sleep: async () => {
@@ -1498,7 +1496,7 @@ Deno.test("새 코덱스 작업의 셸 준비가 늦어도 다시 시작해 결�
       onStart: () =>
         writeJsonl(path, [
           codexMeta(),
-          ...codexTurn("retry", `${prefix}작업`, "회복 결과"),
+          ...codexTurn("retry", "작업", "회복 결과"),
         ]),
     }),
     herdr({}),
@@ -1573,7 +1571,7 @@ Deno.test("중단된 작업의 셸 준비가 늦으면 다시 시작하고 재�
           onStart: () =>
             appendJsonl(
               path,
-              codexTurn("resumed", `${prefix}수정`, "재개 결과"),
+              codexTurn("resumed", "수정", "재개 결과"),
             ),
         }),
         herdr({ agent_status: "done", state_change_seq: 2 }),
@@ -2053,7 +2051,7 @@ Deno.test("작업용 셸을 다시 시작한 뒤 요청 처리에 실패해도 �
                   "11111111-2222-3333-4444-555555555555",
                   "/different-workspace",
                 ),
-                ...codexTurn("retry", `${prefix}작업`),
+                ...codexTurn("retry", "작업"),
               ],
             ),
         }),
@@ -2102,7 +2100,7 @@ Deno.test("작업용 셸을 다시 시작한 뒤 요청 처리에 실패해도 �
             if (failure !== "raw") {
               writeJsonl(path, [
                 codexMeta(),
-                ...codexTurn("retry", `${prefix}작업`),
+                ...codexTurn("retry", "작업"),
               ]);
             }
           },
@@ -2327,7 +2325,7 @@ Deno.test("허더 작업이 시작되거나 완료되기를 기다리다 제한 
         now += 400;
         appendJsonl(
           path,
-          codexTurn("late", `${prefix}늦은 prompt`, "늦은 결과"),
+          codexTurn("late", "늦은 prompt", "늦은 결과"),
         );
         delayedPromptWritten = true;
       }
@@ -2381,7 +2379,7 @@ Deno.test("허더 작업이 시작되거나 완료되기를 기다리다 제한 
           createdPath,
           [
             codexMeta(createdId),
-            ...codexTurn("new", `${prefix}신규 중단`),
+            ...codexTurn("new", "신규 중단"),
           ],
         ),
     }),
@@ -2561,7 +2559,7 @@ Deno.test("허더 작업의 제한 시간이 지나면 시작에 실패한 패�
           codexMeta(),
           ...codexTurn(
             "gate-timeout",
-            `${prefix}게이트 뒤 작업`,
+            "게이트 뒤 작업",
             "게이트 뒤 완료",
           ),
         ]),
@@ -2677,7 +2675,7 @@ Deno.test("사용자 취소와 제한 시간 초과가 겹치면 취소 결과�
         onStart: () =>
           writeJsonl(path, [
             codexMeta(),
-            ...codexTurn("turn", `${prefix}작업`),
+            ...codexTurn("turn", "작업"),
           ]),
       }),
       blocking,
@@ -2726,7 +2724,7 @@ Deno.test("작업 완료 후 이름 변경이나 정리 중 취소되면 중단 
     await using dir = await createTempDir({ prefix: "delegate-test-" });
     const path = codexPath(dir.path);
     const controller = new AbortController();
-    const responses = completedUntilPostProcessing(path, `${prefix}작업`);
+    const responses = completedUntilPostProcessing(path, "작업");
     if (scenario.stage.startsWith("rename")) {
       responses.push(
         scenario.stage === "rename-command"
@@ -3144,7 +3142,7 @@ Deno.test("클로드는 시작 화면에 폴더 신뢰 확인이 보이면 권�
         onStart: () => {
           const id = assignedSessionId(test.fake.calls);
           writeJsonl(claudePath(dir.path, id), [
-            ...claudeOpen(`${prefix}작업`, id),
+            ...claudeOpen("작업", id),
             {
               type: "assistant",
               sessionId: id,
@@ -3280,7 +3278,7 @@ Deno.test("클로드 세션이 허더에서 클로드 작업을 시작하면 호
       onStart: () => {
         const assignedId = assignedSessionId(test.fake.calls);
         writeJsonl(claudePath(dir.path, assignedId), [
-          ...claudeOpen(`${prefix}화면 작업`, assignedId),
+          ...claudeOpen("화면 작업", assignedId),
           {
             type: "assistant",
             sessionId: assignedId,
@@ -3499,8 +3497,7 @@ Deno.test("상주 클로드 세션을 분리 요청으로 시작·후속·재개
     );
   const keepsBudget = (calls: { args: string[] }[]) =>
     calls.every((call) =>
-      (call.args[1] !== "start" || call.args.includes(budgetSettings(1))) &&
-      !(call.args[1] === "prompt" && call.args[3]!.startsWith(prefix))
+      call.args[1] !== "start" || call.args.includes(budgetSettings(1))
     );
   const marksResident = (calls: { args: string[] }[]) =>
     calls.filter((call) => call.args[1] === "start").every((call) =>
@@ -3881,7 +3878,7 @@ Deno.test("상주 세션은 일반 요청·대기·재개가 끝나거나 취소
   assertEquals(closesPane(resumed.fake.calls), false);
 });
 
-Deno.test("남은 위임 단계가 없으면 새 위임을 거절하고 있으면 자식 셸에 한 단계 줄여 넘기며 마지막 단계에만 재위임 금지를 붙인다", async () => {
+Deno.test("남은 위임 단계가 없으면 새 위임을 거절하고 있으면 자식 셸에 한 단계 줄여 넘기며 마지막 단계에도 요청을 그대로 보낸다", async () => {
   await using dir = await createTempDir({ prefix: "delegate-test-" });
   for (const budget of ["0", "x"]) {
     const refused = setup(dir.path, "작업", [], {
@@ -3924,7 +3921,7 @@ Deno.test("남은 위임 단계가 없으면 새 위임을 거절하고 있으�
     ],
     "-c",
   );
-  assertEquals(last.fake.calls[0]!.stdin, `${prefix}작업`);
+  assertEquals(last.fake.calls[0]!.stdin, "작업");
 });
 
 Deno.test("클로드에 요청한 뒤 차단되면 기록이 없어도 패널 화면과 차단 상태를 보여준다", async () => {
@@ -4063,11 +4060,11 @@ Deno.test("클로드와 코덱스에 직접 요청하면 새 세션을 먼저 �
         if (agent === "codex") {
           writeJsonl(codexPath(dir.path), [
             codexMeta(id, sessionCwd),
-            ...codexTurn("first", `${prefix}작업`, "# 완료\n\n본문"),
+            ...codexTurn("first", "작업", "# 완료\n\n본문"),
           ]);
         } else {
           writeJsonl(claudePath(dir.path), [
-            ...claudeOpen(`${prefix}작업`, id, sessionCwd),
+            ...claudeOpen("작업", id, sessionCwd),
             {
               type: "assistant",
               message: { content: [{ type: "text", text: "# 완료\n\n본문" }] },
@@ -4355,7 +4352,7 @@ Deno.test("선택한 CLI가 없으면 설치된 에이전트로 요청을 마치
 Deno.test("Herdr에서도 선택한 CLI가 없으면 설치된 에이전트로 시작하고 둘 다 없으면 패널을 만들지 않는다", async () => {
   await using dir = await createTempDir({ prefix: "delegate-test-" });
   const test = setup(dir.path, "작업", [
-    ...completedUntilPostProcessing(codexPath(dir.path), `${prefix}작업`),
+    ...completedUntilPostProcessing(codexPath(dir.path), "작업"),
     ...successfulCleanup(),
   ], {
     installed: ["codex"],
@@ -4456,7 +4453,7 @@ Deno.test({
           transport === "direct" ? [directReply("claude")] : [
             ...completedUntilPostProcessing(
               codexPath(dir.path),
-              `${prefix}작업`,
+              "작업",
             ),
             ...successfulCleanup(),
           ],
@@ -4661,7 +4658,7 @@ Deno.test("클로드 로그에서 사람의 요청과 최종 답변·공개 도�
     promptSource: "typed",
     userType: "external",
     isSidechain: false,
-    message: { role: "user", content: `${prefix}클로드 요청` },
+    message: { role: "user", content: "클로드 요청" },
   }, {
     type: "assistant",
     sessionId: claudeId,
@@ -4730,7 +4727,7 @@ Deno.test("클로드 로그에서 사람의 요청과 최종 답변·공개 도�
 Deno.test("진행 중인 클로드 작업에 후속 요청을 보내면 도구 실행 중인 턴에 합쳐져 화면이 먼저 쉬어도 후속 결과를 받고 첫 요청 기록을 남긴다", async () => {
   await using dir = await createTempDir({ prefix: "delegate-test-" });
   const path = claudePath(dir.path);
-  writeJsonl(path, [...claudeOpen(`${prefix}첫 요청`), {
+  writeJsonl(path, [...claudeOpen("첫 요청"), {
     type: "assistant",
     sessionId: claudeId,
     cwd,
@@ -4789,7 +4786,7 @@ Deno.test("진행 중인 클로드 작업에 후속 요청을 보내면 도구 �
             },
           },
           queued("task-notification", "<task-notification>작업 완료"),
-          queued("human", `${prefix}후속 요청`),
+          queued("human", "후속 요청"),
         ]);
         followUpWritten = true;
       }
@@ -4903,7 +4900,7 @@ Deno.test("클로드가 백그라운드 작업을 기다리며 응답을 멈추�
       herdr({ agent: currentClaude("working", 2) }, {
         onStart: () =>
           appendJsonl(path, [
-            ...claudeOpen(`${prefix}측정`),
+            ...claudeOpen("측정"),
             ...background("shell", { backgroundTaskId: "bshell" }),
             ...background("monitor", { taskId: "bmon", persistent: false }),
             ...background("watch", { taskId: "bwatch", persistent: true }),
@@ -5082,7 +5079,7 @@ Deno.test("코덱스 갈래 대화가 끝나 화면이 쉬어도 위임 요청�
   const test = setup(dir.path, "수집", [
     herdr({ agents: [liveAgent("idle", 1)] }),
     herdr({ agent: currentAgent("working", 2) }, {
-      onStart: () => appendJsonl(path, codexTurn("turn-main", `${prefix}수집`)),
+      onStart: () => appendJsonl(path, codexTurn("turn-main", "수집")),
     }),
     // herdr는 화면으로 상태를 판정해 /side 답변 종료를 쉬는 상태로 보고한다.
     herdr({ agent: liveAgent("done", 3) }),
@@ -5120,7 +5117,7 @@ Deno.test("클로드가 백그라운드 작업을 기다리며 응답을 멈추�
     { type: "system", subtype: "turn_duration" },
   ];
   writeJsonl(path, [
-    ...claudeOpen(`${prefix}측정`),
+    ...claudeOpen("측정"),
     { type: "user", toolUseResult: { backgroundTaskId: "bshell" } },
     ...answer("기다립니다"),
   ]);
@@ -5683,7 +5680,7 @@ Deno.test("패널 부재 메시지가 정확히 일치할 때만 세션을 한 �
         const path = codexPath(dir.path);
         writeJsonl(path, [
           codexMeta(),
-          ...codexTurn("t", `${prefix}작업`, "완료"),
+          ...codexTurn("t", "작업", "완료"),
         ]);
         let now = 0;
         const controller = new AbortController();
@@ -5712,7 +5709,7 @@ Deno.test("패널 부재 메시지가 정확히 일치할 때만 세션을 한 �
           : firstMessage;
         const responses = [
           ...(command === "prompt"
-            ? completedUntilPostProcessing(path, `${prefix}작업`)
+            ? completedUntilPostProcessing(path, "작업")
             : command === "wait"
             ? [
               herdr({ agents: [liveAgent("done", 2)] }),
@@ -6390,7 +6387,7 @@ function prepareClaudeToolCall(root: string) {
       herdr({ agents: [claudeLive("idle", 1)] }),
       herdr({ agent: currentClaude("working", 2) }, {
         onStart: () => {
-          appendJsonl(path, claudeOpen(`${prefix}촬영`));
+          appendJsonl(path, claudeOpen("촬영"));
           append({
             type: "assistant",
             requestId: "req-shot",

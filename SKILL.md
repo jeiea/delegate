@@ -1,6 +1,6 @@
 ---
 name: delegate
-description: 코드 탐색 외 작업의 코덱스·클로드 세션 위임, 기존 위임의 후속 요청·확인·정리, 독립 관점·다른 모델 검토 시 사용
+description: 코드 탐색 외 작업의 코덱스·클로드 세션 위임, 기존 위임의 후속 요청·확인·정리, 독립 관점·다른 모델 검토 시 사용. `DELEGATE_BUDGET=0`인 셸에서는 새 위임 불가
 allowed-tools: Bash(herdr *) Bash(deno run *)
 ---
 
@@ -37,7 +37,7 @@ allowed-tools: Bash(herdr *) Bash(deno run *)
 ```sh
 deno run -A {SKILL_BASE_DIR}/src/delegate.ts prompt --help
 
-# 새 작업
+# 새 작업. DELEGATE_BUDGET=0이면 거절되니 직접 수행
 deno run -A {SKILL_BASE_DIR}/src/delegate.ts prompt --agent other --timeout 20m <<'PROMPT'
 <역할, 맥락, 작업, 종료 조건>
 PROMPT

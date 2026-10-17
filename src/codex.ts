@@ -1,6 +1,5 @@
 import {
   budgetVariable,
-  delegationGuard,
   type NativeInvocation,
   type PlanRequest,
 } from "./select.ts";
@@ -76,7 +75,7 @@ export function planCodex(request: PlanRequest): NativeInvocation {
       "-",
     ],
     herdrArgs: [...globals, ...resume],
-    prompt: delegationGuard(request) + request.prompt,
+    prompt: request.prompt,
   };
 }
 
