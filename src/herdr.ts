@@ -114,7 +114,7 @@ export async function promptHerdr(
   }
   if (
     live != null && expected != null &&
-    hasLiveOptionConflict(request, expected.agent)
+    hasLiveOptionConflict(request)
   ) {
     throw new DelegateError(
       "live_option_conflict",
@@ -189,8 +189,9 @@ export async function promptHerdr(
               request.invocation.agent,
               ownedCwd,
             );
+            // 이름에는 클로드 시작 인자와 같은 확정된 호출자 ID를 쓴다.
             const submitted = await submitPromptOnly(
-              request,
+              { ...request, callerId },
               agentStart.live,
               "started",
               knownSessionId,
@@ -298,14 +299,6 @@ export async function promptHerdr(
         boundaryCursor.identity === settled.snapshot.cursor.identity
       ? boundaryCursor.byteLength
       : 0;
-    if (settled.snapshot.agent === "codex" && request.name != null) {
-      await renameCodex(
-        live,
-        sessionTitle({ callerId, name: request.name }),
-        settled.snapshot.cwd,
-        executionDeps,
-      );
-    }
     const outcome = outcomeAfter(settled.snapshot, {
       offset,
       excludeInitialTurn: true,
@@ -605,8 +598,6 @@ export async function waitHerdr(
   snapshot: SharedSession,
   options: {
     timeoutMs: number;
-    callerId?: string;
-    name?: string;
     close: boolean;
   },
   deps: HerdrDeps,
@@ -624,18 +615,6 @@ export async function waitHerdr(
   const settled = await waitForQuiescence(snapshot, live, deadline, deps, {
     since: snapshot.cursor,
   });
-  if (snapshot.agent === "codex" && options.name != null) {
-    const callerId = await withSessionError(
-      resolveCallerId(options.callerId, deps, snapshot.cwd),
-      snapshot.sessionId,
-    );
-    await renameCodex(
-      live,
-      sessionTitle({ callerId, name: options.name }),
-      snapshot.cwd,
-      deps,
-    );
-  }
   const outcome = outcomeAfter(settled.snapshot, {
     ...boundary,
     offset: boundaryCursor.path === settled.snapshot.cursor.path &&
@@ -805,6 +784,15 @@ async function submitPromptOnly(
   deps: HerdrDeps,
 ): Promise<SubmittedPrompt> {
   readReportedSessionId(live, knownSessionId);
+  // 클로드는 시작 인자로 이름을 받고, 코덱스는 첫 프롬프트 전 /rename으로 같은 이름을 붙인다.
+  if (origin === "started" && request.invocation.agent === "codex") {
+    await renameCodex({
+      name: live.name,
+      title: sessionTitle(request),
+      cwd: request.snapshot?.cwd ?? request.cwd,
+      sessionId: knownSessionId,
+    }, deps);
+  }
   const before = request.snapshot == null
     ? undefined
     : (await refreshNativeSession(request.snapshot)).cursor;
@@ -1869,28 +1857,15 @@ async function cleanupAutomatically(
 }
 
 async function renameCodex(
-  live: LiveAgent,
-  title: string,
-  cwd: string,
+  { name, title, cwd, sessionId }: {
+    name: string;
+    title: string;
+    cwd: string;
+    sessionId?: string;
+  },
   deps: HerdrDeps,
 ): Promise<void> {
   if (title === "") return;
-  try {
-    await submitCodexTitle(live.name, title, cwd, deps, live.sessionId);
-  } catch (error) {
-    const normalized = normalizeError(error);
-    if (isLifecycleError(normalized)) throw normalized;
-    // Codex local command는 best effort이며 공개 warning을 만들지 않는다.
-  }
-}
-
-async function submitCodexTitle(
-  name: string,
-  title: string,
-  cwd: string,
-  deps: HerdrDeps,
-  sessionId?: string,
-): Promise<void> {
   await json(cwd, deps, ["agent", "prompt", name, `/rename ${title}`]);
   await pause(500, deps, sessionId);
 }
@@ -2245,9 +2220,8 @@ function isSessionAgentName(
   return shown != null && compactId(sessionId).startsWith(shown);
 }
 
-function hasLiveOptionConflict(request: HerdrPrompt, agent: Agent): boolean {
-  return request.startOptionsSpecified ||
-    (agent === "claude" && request.name != null);
+function hasLiveOptionConflict(request: HerdrPrompt): boolean {
+  return request.startOptionsSpecified || request.name != null;
 }
 
 function activityOf(status: string): PublicActivity {

@@ -104,8 +104,6 @@ type ParsedCommand = PromptOptions | {
   kind: "wait";
   target: string;
   timeoutMs: number;
-  callerId?: string;
-  name?: string;
   close: boolean;
 } | {
   kind: "logs";
@@ -202,7 +200,7 @@ function parser() {
         })),
         name: optional(option("--name", string({ metavar: "NAME" }), {
           description:
-            message`native session 표시 이름. Claude는 새 시작·종료 뒤 재개 시만 적용, Codex는 완료 뒤 /rename`,
+            message`native session 표시 이름. 호출자 ID 뒤에 붙이며 새 시작·종료 뒤 재개 시만 적용`,
         })),
         timeoutMs: withDefault(
           option("--timeout", duration, {
@@ -241,7 +239,7 @@ cancelled: 호출자 중단(SIGINT·SIGTERM). 확인된 관리 pane을 닫아 �
 
 invalid_native_session: pane이 확인되면 error.pane.pane_id와 현재 화면을 반환. 차단 해소 뒤에도 native 기록 파일이 없을 수 있으므로 pane을 확인하고 필요 시 정리
 
-live_option_conflict: 실행 중 session에 --permission·--effort·--add-dir 지정
+live_option_conflict: 실행 중 session에 --permission·--effort·--add-dir·--name 지정
 
 live_session_ambiguous: 같은 session의 다른 재개 진행 중. 완료 뒤 재시도
 
@@ -300,13 +298,6 @@ last_activity_at과 last_activity는 서로 다른 기록을 가리킬 수 있�
           }),
           1_200_000,
         ),
-        callerId: optional(option("--caller-id", string({ metavar: "ID" }), {
-          description: message`Codex --name 지정 시 표시 이름 접두사로 사용`,
-        })),
-        name: optional(option("--name", string({ metavar: "NAME" }), {
-          description:
-            message`Codex 전용. prompt가 중단돼 이름을 못 붙였으면 같은 값 재전달`,
-        })),
         close: option("--close", {
           description:
             message`완료 뒤 관리 pane 정리를 이 호출이 맡음. 다시 background_wait로 끝나면 정리 보류. Herdr 전용`,
@@ -447,15 +438,6 @@ async function runCommand(
   try {
     if (parsed.kind !== "prompt") {
       const snapshot = await findNativeSession(parsed.target, deps.env);
-      if (
-        parsed.kind === "wait" && snapshot.agent === "claude" &&
-        parsed.name != null
-      ) {
-        throw new DelegateError(
-          "usage",
-          "Claude wait에는 --name을 사용할 수 없습니다",
-        );
-      }
       if (parsed.kind === "logs") {
         return documentResult({
           session_id: snapshot.sessionId,
