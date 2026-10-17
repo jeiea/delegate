@@ -53,26 +53,34 @@ function countPair(args: readonly string[], pair: readonly string[]): number {
   );
 }
 
-Deno.test("읽기 전용 Codex는 임시 파일과 네트워크 사용을 허용하는 권한으로 시작한다", () => {
-  const plan = planCodex({
-    cwd: "/workspace",
-    addDirs: [],
-    prompt: "조사",
-    budget: 1,
-    permission: "read-only",
-  });
+Deno.test("Codex는 맡긴 검증 명령이 쓰는 네트워크를 허용하고 읽기 전용이면 임시 파일만 쓰는 권한으로 시작한다", () => {
+  const expected = {
+    "read-only": [
+      'default_permissions="delegate-read-only"',
+      'permissions.delegate-read-only.extends=":read-only"',
+      "permissions.delegate-read-only.network.enabled=true",
+      'permissions.delegate-read-only.filesystem={":tmpdir"="write",":slash_tmp"="write"}',
+    ],
+    write: [
+      'default_permissions="delegate-write"',
+      'permissions.delegate-write.extends=":workspace"',
+      "permissions.delegate-write.network.enabled=true",
+    ],
+  };
+  for (const permission of ["read-only", "write"] as const) {
+    const plan = planCodex({
+      cwd: "/workspace",
+      addDirs: [],
+      prompt: "조사",
+      budget: 1,
+      permission,
+    });
 
-  for (const args of [plan.directArgs, plan.herdrArgs]) {
-    assertEquals(args.includes("-s"), false);
-    for (
-      const value of [
-        'default_permissions="delegate-read-only"',
-        'permissions.delegate-read-only.extends=":read-only"',
-        "permissions.delegate-read-only.network.enabled=true",
-        'permissions.delegate-read-only.filesystem={":tmpdir"="write",":slash_tmp"="write"}',
-      ]
-    ) {
-      assertEquals(countPair(args, ["-c", value]), 1, value);
+    for (const args of [plan.directArgs, plan.herdrArgs]) {
+      assertEquals(args.includes("-s"), false);
+      for (const value of expected[permission]) {
+        assertEquals(countPair(args, ["-c", value]), 1, value);
+      }
     }
   }
 });

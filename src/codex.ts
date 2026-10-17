@@ -40,7 +40,17 @@ export function planCodex(request: PlanRequest): NativeInvocation {
       "-c",
       'permissions.delegate-read-only.filesystem={":tmpdir"="write",":slash_tmp"="write"}',
     ]
-    : ["--approve-for-me"];
+    : [
+      "--approve-for-me",
+      // 기본 쓰기 샌드박스는 네트워크·유닉스 소켓·로컬 바인딩을 막아, 맡긴 테스트·빌드가
+      // 실패한 뒤 권한 상승으로 재실행됨. 상승은 어차피 자동 승인이라 처음부터 허용
+      "-c",
+      'default_permissions="delegate-write"',
+      "-c",
+      'permissions.delegate-write.extends=":workspace"',
+      "-c",
+      "permissions.delegate-write.network.enabled=true",
+    ];
   const globals = [
     "--search",
     "-c",
