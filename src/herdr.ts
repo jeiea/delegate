@@ -87,7 +87,9 @@ class LiveAgentListError extends DelegateError {}
 const paneLockWaitMs = 60_000;
 const activityGateMs = 30_000;
 const identityPollMs = 10_000;
-const recoveryMs = 500;
+const recoveryMs = 1_000;
+const codexQuitMs = 5_000;
+const codexQuitPollMs = 250;
 const diagnosticMs = 1_000;
 
 export async function promptHerdr(
@@ -214,7 +216,8 @@ export async function promptHerdr(
               !retainPane &&
               !["agent_blocked", "cancelled"].includes(preserved.code)
             ) {
-              await recoverOwnedPane(ownership, ownedCwd, deps).catch(() => {});
+              await recoverOwnedPane(ownership, ownedCwd, deps, diagnostic)
+                .catch(() => {});
             }
             throw preserved;
           }
@@ -240,6 +243,7 @@ export async function promptHerdr(
             started.ownership,
             started.ownedCwd,
             deps,
+            diagnostic,
           ).catch(() => {});
         }
         throw preserved;
@@ -372,8 +376,18 @@ async function closeCancelledPane(
   snapshot: SharedSession | undefined,
   deps: HerdrDeps,
 ): Promise<DelegateError> {
-  const recoveryDeps = { ...deps, signal: AbortSignal.timeout(recoveryMs) };
+  const codex = startedCodex(target);
+  const recoveryDeps = {
+    ...deps,
+    signal: AbortSignal.timeout(recoveryMs + (codex ? codexQuitMs : 0)),
+  };
   try {
+    if (codex) {
+      await quitCodex({
+        ...target,
+        sessionId: snapshot?.sessionId ?? target.sessionId,
+      }, recoveryDeps);
+    }
     if (snapshot == null) {
       await closePane(target.paneId, target.cwd, recoveryDeps);
     } else {
@@ -404,6 +418,13 @@ type PaneTarget = {
   sessionId?: string;
   strictPane?: boolean;
 };
+
+// 시작 전 대상(strictPane)은 에이전트가 없을 수 있어 빈 셸처럼 바로 닫는다.
+function startedCodex(
+  target: PaneTarget | undefined,
+): target is PaneTarget {
+  return target?.agent === "codex" && target.strictPane !== true;
+}
 
 function paneTarget(
   live: LiveAgent,
@@ -666,6 +687,13 @@ export async function closeHerdr(
       ) throw error;
       // 취소 직후 agent가 사라지는 것은 정상적인 정리 경로다.
     }
+  }
+  if (snapshot.agent === "codex") {
+    await quitCodex({
+      name: live.name,
+      cwd: snapshot.cwd,
+      sessionId: snapshot.sessionId,
+    }, deps);
   }
   const deadline = deps.now() + paneLockWaitMs;
   await withPaneLock(
@@ -1807,15 +1835,18 @@ async function recoverOwnedPane(
   ownership: OwnedPaneId,
   cwd: string,
   deps: HerdrDeps,
+  target?: PaneTarget,
 ): Promise<void> {
   if (ownership == null) return;
+  const codex = startedCodex(target);
   const recoveryDeps: HerdrDeps = {
     exec: deps.exec,
     env: deps.env,
-    signal: AbortSignal.timeout(recoveryMs),
+    signal: AbortSignal.timeout(recoveryMs + (codex ? codexQuitMs : 0)),
     now: deps.now,
     sleep: deps.sleep,
   };
+  if (codex) await quitCodex({ ...target, cwd }, recoveryDeps);
   await cleanupOwnedPane(
     ownership,
     cwd,
@@ -1839,6 +1870,13 @@ async function cleanupAutomatically(
   }
   const { paneId } = live;
   try {
+    if (snapshot.agent === "codex") {
+      await quitCodex({
+        name: live.name,
+        cwd: snapshot.cwd,
+        sessionId: snapshot.sessionId,
+      }, deps);
+    }
     return await withPaneLock(
       { deadline, deps, sessionId: live.sessionId },
       async () => {
@@ -1895,6 +1933,49 @@ async function resolveCallerId(
       );
     }
     return undefined;
+  }
+}
+
+// 코덱스는 정상 종료할 때만 SessionEnd 훅을 실행해 pane을 닫기 전에 /quit으로 끝낸다.
+// 입력 거절·통신 실패·종료 지연이면 돌아가 호출자가 기존대로 pane을 닫고, 세션이 바뀌면 닫지 않도록 오류를 전한다.
+async function quitCodex(
+  agent: { name: string; cwd: string; sessionId?: string },
+  deps: HerdrDeps,
+): Promise<void> {
+  const quitDeps: HerdrDeps = {
+    exec: deps.exec,
+    env: deps.env,
+    signal: AbortSignal.any([
+      executionSignal(deps),
+      AbortSignal.timeout(codexQuitMs),
+    ]),
+    now: deps.now,
+    sleep: deps.sleep,
+  };
+  const deadline = deps.now() + codexQuitMs;
+  try {
+    await json(agent.cwd, quitDeps, ["agent", "prompt", agent.name, "/quit"]);
+    while (remaining(deadline, deps) > 0) {
+      await pause(
+        Math.min(codexQuitPollMs, remaining(deadline, deps)),
+        quitDeps,
+      );
+      await getAgent(
+        { name: agent.name, status: "unknown" },
+        agent.cwd,
+        quitDeps,
+        agent.sessionId,
+      );
+    }
+  } catch (error) {
+    const interruption = interruptionError(deps, agent.sessionId);
+    if (interruption != null) throw interruption;
+    const normalized = normalizeError(error);
+    if (
+      ["session_id_changed", "invalid_native_session"].includes(
+        normalized.code,
+      )
+    ) throw normalized;
   }
 }
 
