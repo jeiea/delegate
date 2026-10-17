@@ -400,7 +400,7 @@ Deno.test("현재 코덱스 작업 공간을 찾지 못하면 위임을 거부�
   ]);
 });
 
-Deno.test("백그라운드 클로드 세션이 보이는 패널을 찾지 못하면 후보 패널과 호출자 지정·개선 문의를 안내하고 검증되는 이어짐 기록이 패널 하나로만 닿으면 그 작업 공간에서 이어 오기 전 위임과 같은 탭을 나눠 띄우고 이 작업을 붙여 보는 패널은 기록보다 우선해 상주 위임 기준으로 삼는다", async () => {
+Deno.test("백그라운드 클로드 세션이 보이는 패널을 찾지 못하면 후보 패널과 호출자 지정·개선 문의를 안내하고 검증되는 이어짐 기록이 패널 하나로만 닿으면 그 작업 공간에서 이어 오기 전 위임과 같은 탭을 나눠 띄우고 이 작업을 붙여 보는 패널은 기록보다 우선해 위임 기준으로 삼는다", async () => {
   await using dir = await createTempDir({ prefix: "delegate-test-" });
   const backgroundId = "11111111-2222-4333-8444-555555555555";
   const viewerId = "22222222-3333-4444-8555-666666666666";
@@ -459,15 +459,6 @@ Deno.test("백그라운드 클로드 세션이 보이는 패널을 찾지 못하
   };
   const foreground = (argv: string[]) =>
     herdr({ process_info: { foreground_processes: [{ argv }] } });
-  const resident = {
-    agent: "claude",
-    agent_session: { kind: "id", value: claudeId },
-    name: `dlg-r-${claudeId.replaceAll("-", "").slice(0, 26)}`,
-    pane_id: "pane-resident",
-    tab_id: "tab-resident",
-    workspace_id: "ws-resident",
-    cwd,
-  };
   const child = {
     agent: "codex",
     agent_session: { kind: "id", value: codexId },
@@ -479,7 +470,7 @@ Deno.test("백그라운드 클로드 세션이 보이는 패널을 찾지 못하
   };
 
   const missing = setup(dir.path, "검토 요청", [
-    herdr({ agents: [viewer, resident, child] }),
+    herdr({ agents: [viewer, child] }),
   ], { env });
   const rejected = await runDelegate(
     ["prompt", "--agent", "codex"],
@@ -495,7 +486,6 @@ Deno.test("백그라운드 클로드 세션이 보이는 패널을 찾지 못하
       "스타일 분리 기준",
       "--caller-id",
       "스킬·도구 개선",
-      "pane-resident",
     ]
   ) assertStringIncludes(rejected.stdout, shown);
   assertEquals(rejected.stdout.includes("pane-child"), false);
@@ -558,18 +548,27 @@ Deno.test("백그라운드 클로드 세션이 보이는 패널을 찾지 못하
   const anchored = setup(dir.path, "원장 점검", [
     herdr({ agents: [viewer, other, attached] }),
     foreground(["claude.exe", "attach", "11111111"]),
-    herdr({ workspace: { workspace_id: "ws-attached", number: 1 } }),
-    herdrFailure("workspace create failed"),
+    herdrFailure("tab create failed"),
   ], { env });
-  const detached = await runDelegate(
-    ["prompt", "--agent", "claude", "--detach"],
+  const placed = await runDelegate(
+    ["prompt", "--agent", "claude"],
     anchored.deps,
   );
-  assertEquals(detached.code, 5, detached.stdout);
+  assertEquals(placed.code, 5, placed.stdout);
   assertEquals(anchored.fake.calls.slice(0, 3).map(({ args }) => args), [
     ["agent", "list"],
     ["pane", "process-info", "--pane", "pane-attached"],
-    ["workspace", "get", "ws-attached"],
+    [
+      "tab",
+      "create",
+      "--workspace",
+      "ws-attached",
+      "--cwd",
+      cwd,
+      "--label",
+      backgroundId,
+      "--no-focus",
+    ],
   ]);
 });
 
@@ -613,21 +612,6 @@ Deno.test("같은 세션이 이어서 위임하면 사용자가 패널을 옮겼
           "dlg-111111112222-ccccccccccccccc",
           "pane-second",
           "tab-review",
-        ),
-        delegated(
-          "dlg-r-dddddddddddddddddddddddddd",
-          "pane-r1",
-          "tab-resident",
-        ),
-        delegated(
-          "dlg-r-eeeeeeeeeeeeeeeeeeeeeeeeee",
-          "pane-r2",
-          "tab-resident",
-        ),
-        delegated(
-          "dlg-r-ffffffffffffffffffffffffff",
-          "pane-r3",
-          "tab-resident",
         ),
         delegated("dlg-999999999999-111111111111111", "pane-o1", "tab-other"),
         delegated("dlg-999999999999-222222222222222", "pane-o2", "tab-other"),
@@ -3477,7 +3461,7 @@ Deno.test("클로드 시작에 승인이 필요하면 기록이 생기기 전에
   }
 });
 
-Deno.test("상주 클로드 세션을 분리 요청으로 시작·후속·재개하면 현재 작업 공간 바로 다음의 새 작업 공간에 띄우고 상주 표시와 호출자의 위임 단계를 그대로 넘기고 제출과 세션 확인까지만 기다리며 전달이 불확실하거나 호출자가 중단돼도 패널을 남긴다", async () => {
+Deno.test("관제 세션을 분리 요청으로 시작·후속·재개하면 현재 작업 공간 바로 다음의 새 작업 공간에 띄워 분리 표시를 남기고 자식 위임 단계를 처음부터 주며 제출과 세션 확인까지만 기다리고 전달이 불확실하거나 호출자가 중단돼도 패널을 남긴다", async () => {
   await using dir = await createTempDir({ prefix: "delegate-test-" });
   await using socket = fakeHerdrSocket(join(dir.path, "herdr.sock"));
   let now = 0;
@@ -3489,21 +3473,27 @@ Deno.test("상주 클로드 세션을 분리 요청으로 시작·후속·재개
     },
   };
   const env = { HERDR_ENV: "1", DELEGATE_BUDGET: "1" };
-  const callerArgs = ["--caller-id", "resident-caller", "--detach"];
+  const callerArgs = ["--caller-id", "detached-caller", "--detach"];
   const untouchedPane = (calls: { args: string[] }[]) =>
     calls.every((call) =>
       call.args[1] !== "wait" &&
       call.args.join(" ") !== "pane close pane-delegate"
     );
-  const keepsBudget = (calls: { args: string[] }[]) =>
-    calls.every((call) =>
-      call.args[1] !== "start" || call.args.includes(budgetSettings(1))
-    );
-  const marksResident = (calls: { args: string[] }[]) =>
+  const startsFresh = (calls: { args: string[] }[]) =>
     calls.filter((call) => call.args[1] === "start").every((call) =>
-      call.args.includes("--name=[상주] resident-caller") &&
-      call.args[2]!.startsWith("dlg-r-")
+      call.args.includes(budgetSettings(2)) &&
+      call.args.includes("--name=detached-caller")
     );
+  const marked = {
+    method: "pane.report_metadata",
+    params: {
+      pane_id: "pane-delegate",
+      source: "delegate",
+      tokens: { delegate: "detached" },
+    },
+  };
+  const requests = () =>
+    socket.requests.splice(0).map(({ method, params }) => ({ method, params }));
 
   let id = "";
   const started = setup(dir.path, "원장 점검", [
@@ -3538,23 +3528,19 @@ Deno.test("상주 클로드 세션을 분리 요청으로 시작·후속·재개
       "--cwd",
       cwd,
       "--label",
-      "[상주] resident-caller",
+      "detached-caller",
       "--no-focus",
     ],
   ]);
-  assertEquals(
-    socket.requests.map(({ method, params }) => ({ method, params })),
-    [{
-      method: "workspace.move",
-      params: { workspace_id: "ws-resident", insert_index: 2 },
-    }],
-  );
+  assertEquals(requests(), [{
+    method: "workspace.move",
+    params: { workspace_id: "ws-detached", insert_index: 2 },
+  }, marked]);
   assertEquals(started.fake.calls.length, 7);
   assertEquals(untouchedPane(started.fake.calls), true);
-  assertEquals(keepsBudget(started.fake.calls), true);
-  assertEquals(marksResident(started.fake.calls), true);
+  assertEquals(startsFresh(started.fake.calls), true);
 
-  const live = residentLive("working", 2, id);
+  const live = detachedLive("working", 2, id);
   const controller = new AbortController();
   const interrupted = setup(dir.path, "다음 요청", [
     herdr({ agents: [live] }),
@@ -3579,13 +3565,13 @@ Deno.test("상주 클로드 세션을 분리 요청으로 시작·후속·재개
   assertStringIncludes(second.stdout, "activity: working");
   assertEquals(followed.fake.calls.length, 2);
   assertEquals(followed.fake.calls[1]!.args.includes("--wait"), false);
-  assertEquals(keepsBudget(followed.fake.calls), true);
+  assertEquals(requests(), [marked]);
 
   const resumeStart = [
     herdr({ agents: [] }),
     herdr({ agents: [] }),
     ...newWorkspaceAllocation(),
-    herdr({ agent: residentLive("idle", 3, id) }),
+    herdr({ agent: claudeLive("idle", 3, id) }),
     readyClaudeScreen(),
   ];
   const unconfirmed = setup(dir.path, "재개 요청", [
@@ -3599,10 +3585,11 @@ Deno.test("상주 클로드 세션을 분리 요청으로 시작·후속·재개
   assertEquals(lost.code, 6, lost.stdout);
   assertStringIncludes(lost.stdout, `session_id: ${id}`);
   assertEquals(untouchedPane(unconfirmed.fake.calls), true);
+  requests();
 
   const resumed = setup(dir.path, "재개 요청", [
     ...resumeStart,
-    herdr({ agent: residentLive("working", 4, id) }, {
+    herdr({ agent: claudeLive("working", 4, id) }, {
       onStart: () =>
         appendJsonl(
           claudePath(dir.path, id),
@@ -3619,11 +3606,11 @@ Deno.test("상주 클로드 세션을 분리 요청으로 시작·후속·재개
   )!;
   assertEquals(resumedStart.args.includes(`--resume=${id}`), true);
   assertEquals(untouchedPane(resumed.fake.calls), true);
-  assertEquals(keepsBudget(resumed.fake.calls), true);
-  assertEquals(marksResident(resumed.fake.calls), true);
+  assertEquals(startsFresh(resumed.fake.calls), true);
+  assertEquals(requests().at(-1), marked);
 });
 
-Deno.test("상주 세션의 새 작업 공간을 옮기지 못하면 빈 패널을 닫고 그사이 호출자가 중단하면 기다리지 않고 중단을 알리며 상주 패널처럼 남긴다", async () => {
+Deno.test("분리 세션의 새 작업 공간을 옮기지 못하면 빈 패널을 닫고 그사이 호출자가 중단하면 기다리지 않고 중단을 알리며 패널을 남긴다", async () => {
   await using dir = await createTempDir({ prefix: "delegate-test-" });
   const controller = new AbortController();
   await using _socket = fakeHerdrSocket(join(dir.path, "herdr.sock"), [
@@ -3636,7 +3623,7 @@ Deno.test("상주 세션의 새 작업 공간을 옮기지 못하면 빈 패널�
     "--agent",
     "claude",
     "--caller-id",
-    "resident-caller",
+    "detached-caller",
     "--detach",
   ];
 
@@ -3678,204 +3665,114 @@ Deno.test("분리 요청은 직접 실행과 함께 쓰면 실행 전에 거부�
   assertEquals(base.fake.calls, []);
 });
 
-Deno.test("코덱스 상주 세션은 실제 요청 전에 상주 이름을 붙여 시작하고 이름을 바꾼 뒤 일반 요청으로 재개해도 패널을 남긴다", async () => {
+Deno.test("분리 세션은 다른 호출의 요청·취소·백그라운드 대기·정리를 맡은 대기 뒤에도 패널을 남기고 닫는 방법을 안내하지 않으며 닫기 요청으로만 정리된다", async () => {
   await using dir = await createTempDir({ prefix: "delegate-test-" });
-  await using _socket = fakeHerdrSocket(join(dir.path, "herdr.sock"));
-  const rollout = codexPath(dir.path);
-  const index = join(dir.path, "codex", "session_index.jsonl");
-  const entry = (thread_name: string) => ({
-    id: codexId,
-    thread_name,
-    updated_at: "2026-10-14T00:00:00Z",
-  });
-  writeJsonl(index, [entry("resident-caller")]);
-  let now = 0;
-  const options = {
-    env: { HERDR_ENV: "1" },
-    now: () => now,
-    sleep: (ms: number) => {
-      now += ms;
-      return Promise.resolve();
-    },
-  };
-  const args = ["--caller-id", "resident-caller"];
-  const title = "/rename [상주] resident-caller";
-  const prompts = (calls: { args: string[] }[]) =>
-    calls.filter((call) => call.args[1] === "prompt").map((call) =>
-      call.args[3]
-    );
-
-  const started = setup(dir.path, "원장 점검", [
-    ...newWorkspaceAllocation(),
-    herdr({ agent: unidentifiedAgent("idle", 1) }),
-    herdr({}, {
-      onStart: () => appendJsonl(index, [entry("[상주] resident-caller")]),
-    }),
-    herdr({ agent: currentAgent("working", 2) }, {
-      onStart: () =>
-        writeJsonl(rollout, [codexMeta(), ...codexTurn("t1", "원장 점검")]),
-    }),
-    herdr({}),
-  ], options);
-  const first = await runDelegate(
-    ["prompt", "--agent", "codex", "--detach", ...args],
-    started.deps,
-  );
-  assertEquals(first.code, 0, first.stdout);
-  assertStringIncludes(first.stdout, `session_id: ${codexId}`);
-  assertEquals(prompts(started.fake.calls), [title, "원장 점검"]);
-  assertEquals(
-    started.fake.calls.at(-1)!.args.slice(1).join(" ").endsWith(
-      residentCodex("idle", 1).name,
-    ),
-    true,
-  );
-  assertEquals(closesPane(started.fake.calls), false);
-
-  const resumed = setup(dir.path, "재개", [
-    herdr({ agents: [] }),
-    herdr({ agents: [] }),
-    ...newWorkspaceAllocation(),
-    herdr({ agent: residentCodex("idle", 3) }),
-    herdr({}),
-    herdr({ agent: residentCodex("working", 4) }, {
-      onStart: () => appendJsonl(rollout, codexTurn("t2", "재개", "재개 결과")),
-    }),
-    herdr({ agent: residentCodex("done", 5) }),
-    herdr({ agent: residentCodex("done", 5) }),
-    herdr({}),
-  ], options);
-  const reopened = await runDelegate(
-    ["prompt", codexId, ...args, "--name", "마스터"],
-    resumed.deps,
-  );
-  assertEquals(reopened.code, 0, reopened.stdout);
-  assertStringIncludes(reopened.stdout, "재개 결과");
-  const start = resumed.fake.calls.find((call) => call.args[1] === "start")!;
-  assertEquals(start.args[2], residentCodex("idle", 3).name);
-  assertEquals(resumed.fake.calls[4]!.args, [
-    "workspace",
-    "create",
-    "--cwd",
-    cwd,
-    "--label",
-    "[상주] resident-caller 마스터",
-    "--no-focus",
-  ]);
-  assertEquals(prompts(resumed.fake.calls), [
-    `${title} 마스터`,
-    "재개",
-    `${title} 마스터`,
-  ]);
-  assertEquals(closesPane(resumed.fake.calls), false);
-});
-
-Deno.test("상주 세션은 일반 요청·대기·재개가 끝나거나 취소돼도 호출자와 같은 위임 단계로 패널을 남기고 닫기 요청으로만 정리된다", async () => {
-  await using dir = await createTempDir({ prefix: "delegate-test-" });
-  await using _socket = fakeHerdrSocket(join(dir.path, "herdr.sock"));
   const path = claudePath(dir.path);
-  const title = {
-    type: "custom-title",
-    customTitle: "[상주] resident-caller",
-    sessionId: claudeId,
-  };
-  const answer = (text: string) => [{
-    type: "assistant",
+  const record = (value: Record<string, unknown>) => ({
     sessionId: claudeId,
     cwd,
-    requestId: `req-${text}`,
-    message: { content: [{ type: "text", text }] },
-  }, { type: "system", subtype: "turn_duration", sessionId: claudeId }];
-  writeJsonl(path, [
-    { ...title, customTitle: "resident-caller" },
-    title,
-    ...claudeOpen("원장 점검"),
-    ...answer("점검 완료"),
-  ]);
-  let now = 0;
-  const options = {
-    env: { HERDR_ENV: "1", DELEGATE_BUDGET: "1" },
-    now: () => now,
-    sleep: (ms: number) => {
-      now += ms;
-      return Promise.resolve();
-    },
-  };
-  const args = ["--caller-id", "resident-caller"];
+    ...value,
+  });
+  const answer = (text: string) => [
+    record({
+      type: "assistant",
+      requestId: `req-${text}`,
+      message: { content: [{ type: "text", text }] },
+    }),
+    record({ type: "system", subtype: "turn_duration" }),
+  ];
+  writeJsonl(path, [...claudeOpen("원장 점검"), ...answer("점검 완료")]);
+  const options = { env: { HERDR_ENV: "1" }, sleep: () => Promise.resolve() };
   const settle = (sequence: number) => [
-    herdr({ agent: residentLive("done", sequence) }),
-    herdr({ agent: residentLive("done", sequence) }),
+    herdr({ agent: detachedLive("done", sequence) }),
+    herdr({ agent: detachedLive("done", sequence) }),
   ];
 
   const controller = new AbortController();
   const interrupted = setup(dir.path, "후속", [
-    herdr({ agents: [residentLive("working", 1)] }),
-    herdr({ agent: residentLive("working", 1) }, {
+    herdr({ agents: [detachedLive("working", 1)] }),
+    herdr({ agent: detachedLive("working", 1) }, {
       onStart: () => controller.abort(),
     }),
   ], { ...options, signal: controller.signal });
   const cancelled = await runDelegate(
-    ["prompt", claudeId, ...args],
+    ["prompt", claudeId, "--caller-id", "caller-1"],
     interrupted.deps,
   );
   assertEquals(cancelled.code, 130, cancelled.stdout);
   assertEquals(closesPane(interrupted.fake.calls), false);
 
   const followed = setup(dir.path, "후속", [
-    herdr({ agents: [residentLive("idle", 1)] }),
-    herdr({ agent: residentLive("working", 2) }, {
+    herdr({ agents: [detachedLive("idle", 1)] }),
+    herdr({ agent: detachedLive("working", 2) }, {
       onStart: () =>
-        appendJsonl(path, [...claudeOpen("후속"), ...answer("후속 결과")]),
+        appendJsonl(path, [
+          ...claudeOpen("후속"),
+          record({
+            type: "assistant",
+            requestId: "req-watch",
+            message: {
+              content: [{ type: "tool_use", id: "call-watch", name: "Bash" }],
+            },
+          }),
+          record({
+            type: "user",
+            message: {
+              content: [{ type: "tool_result", tool_use_id: "call-watch" }],
+            },
+            toolUseResult: { backgroundTaskId: "bwatch" },
+          }),
+          ...answer("감시를 기다립니다"),
+        ]),
     }),
     ...settle(3),
   ], options);
   const prompted = await runDelegate(
-    ["prompt", claudeId, ...args],
+    ["prompt", claudeId, "--caller-id", "caller-1"],
     followed.deps,
   );
-  assertEquals(prompted.code, 0, prompted.stdout);
-  assertStringIncludes(prompted.stdout, "후속 결과");
-  assertEquals(followed.fake.calls[1]!.args[3], "후속");
+  assertEquals(prompted.code, 4, prompted.stdout);
+  assertStringIncludes(prompted.stdout, "감시를 기다립니다");
+  assertStringIncludes(prompted.stdout, `wait ${claudeId}`);
+  assertEquals(prompted.stdout.includes("--close"), false);
+  assertEquals(prompted.stdout.includes(`close ${claudeId}`), false);
   assertEquals(closesPane(followed.fake.calls), false);
 
   const waited = setup(dir.path, "", [
-    herdr({ agents: [residentLive("done", 3)] }),
+    herdr({ agents: [detachedLive("done", 3)] }),
     ...settle(3),
+    herdr({ agent: detachedLive("done", 4) }, {
+      onStart: () =>
+        appendJsonl(path, [
+          record({
+            type: "user",
+            origin: { kind: "task-notification" },
+            promptSource: "system",
+            message: {
+              role: "user",
+              content:
+                "<task-notification>\n<task-id>bwatch</task-id>\n<status>completed</status>\n</task-notification>",
+            },
+          }),
+          ...answer("감시 결과"),
+        ]),
+    }),
+    herdr({ agent: detachedLive("done", 4) }),
   ], options);
-  const result = await runDelegate(["wait", claudeId], waited.deps);
+  const result = await runDelegate(
+    ["wait", claudeId, "--close"],
+    waited.deps,
+  );
   assertEquals(result.code, 0, result.stdout);
+  assertStringIncludes(result.stdout, "감시 결과");
   assertEquals(closesPane(waited.fake.calls), false);
 
   const closing = setup(dir.path, "", [
-    herdr({ agents: [residentLive("idle", 3)] }),
+    herdr({ agents: [detachedLive("idle", 4)] }),
     herdr({}),
   ], options);
   assertEquals((await runDelegate(["close", claudeId], closing.deps)).code, 0);
   assertEquals(closesPane(closing.fake.calls), true);
-
-  const resumed = setup(dir.path, "재개", [
-    herdr({ agents: [] }),
-    herdr({ agents: [] }),
-    ...newWorkspaceAllocation(),
-    herdr({ agent: residentLive("idle", 4) }),
-    readyClaudeScreen(),
-    herdr({ agent: residentLive("working", 5) }, {
-      onStart: () =>
-        appendJsonl(path, [...claudeOpen("재개"), ...answer("재개 결과")]),
-    }),
-    ...settle(6),
-  ], options);
-  const reopened = await runDelegate(
-    ["prompt", claudeId, ...args],
-    resumed.deps,
-  );
-  assertEquals(reopened.code, 0, reopened.stdout);
-  assertStringIncludes(reopened.stdout, "재개 결과");
-  const start = resumed.fake.calls.find((call) => call.args[1] === "start")!;
-  assertEquals(start.args[2], residentLive("idle", 4).name);
-  assertEquals(start.args.includes("--name=[상주] resident-caller"), true);
-  assertEquals(start.args.includes(budgetSettings(1)), true);
-  assertEquals(closesPane(resumed.fake.calls), false);
 });
 
 Deno.test("남은 위임 단계가 없으면 새 위임을 거절하고 있으면 자식 셸에 한 단계 줄여 넘기며 마지막 단계에도 요청을 그대로 보낸다", async () => {
@@ -6211,18 +6108,6 @@ function newTabAllocation(): FakeResponse[] {
   ];
 }
 
-function newWorkspaceAllocation(): FakeResponse[] {
-  return [
-    herdr({ pane: { workspace_id: "ws-caller", tab_id: "current" } }),
-    herdr({ workspace: { workspace_id: "ws-caller", number: 2 } }),
-    herdr({
-      workspace: { workspace_id: "ws-resident" },
-      tab: { tab_id: "tab-delegate" },
-      root_pane: { pane_id: "pane-delegate" },
-    }),
-  ];
-}
-
 function completedUntilPostProcessing(
   path: string,
   prompt: string,
@@ -6301,20 +6186,6 @@ function claudeLive(status: string, sequence: number, id = claudeId) {
     workspace_id: "ws-1",
     tab_id: "tab-delegate",
     pane_id: "pane-delegate",
-  };
-}
-
-function residentLive(status: string, sequence: number, id = claudeId) {
-  return {
-    ...claudeLive(status, sequence, id),
-    name: `dlg-r-${id.replaceAll("-", "").slice(0, 26)}`,
-  };
-}
-
-function residentCodex(status: string, sequence: number) {
-  return {
-    ...liveAgent(status, sequence),
-    name: `dlg-r-${codexId.replaceAll("-", "").slice(0, 26)}`,
   };
 }
 
@@ -6412,4 +6283,23 @@ function closesPane(calls: { args: string[] }[]): boolean {
   return calls.some((call) =>
     call.args.join(" ") === "pane close pane-delegate"
   );
+}
+
+function newWorkspaceAllocation(): FakeResponse[] {
+  return [
+    herdr({ pane: { workspace_id: "ws-caller", tab_id: "current" } }),
+    herdr({ workspace: { workspace_id: "ws-caller", number: 2 } }),
+    herdr({
+      workspace: { workspace_id: "ws-detached" },
+      tab: { tab_id: "tab-delegate" },
+      root_pane: { pane_id: "pane-delegate" },
+    }),
+  ];
+}
+
+function detachedLive(status: string, sequence: number, id = claudeId) {
+  return {
+    ...claudeLive(status, sequence, id),
+    tokens: { delegate: "detached" },
+  };
 }

@@ -59,7 +59,6 @@ export type HerdrPrompt = {
   model?: string;
   warnings: readonly DelegateWarning[];
   detach: boolean;
-  resident: boolean;
 };
 
 type HerdrResult = Record<string, unknown>;
@@ -75,6 +74,7 @@ type LiveAgent = {
   workspaceId?: string;
   tabId?: string;
   paneId?: string;
+  detached?: true;
 };
 
 type ManagedPane = LiveAgent & { paneId: string };
@@ -129,8 +129,6 @@ export async function promptHerdr(
       model: request.model,
     }];
   const model = live == null ? request.model : undefined;
-  // 상주 여부는 시작·재개 때 정해지고 실행 중에는 Herdr 이름이 유지한다.
-  const resident = live == null ? request.resident : isResidentName(live.name);
   const callerId = await withSessionError(
     resolveCallerId(
       request.callerId,
@@ -269,10 +267,7 @@ export async function promptHerdr(
     }
     // 실행 중인 세션은 처음 띄운 호출자 표시를 유지한다.
     if (!isSessionAgentName(live.name, snapshot.sessionId)) {
-      const deterministic = agentName(snapshot.sessionId, {
-        resident,
-        callerId,
-      });
+      const deterministic = agentName(snapshot.sessionId, callerId);
       await renameAgent(live.name, deterministic, snapshot, executionDeps);
       live.name = deterministic;
       if (diagnostic != null) {
@@ -280,6 +275,7 @@ export async function promptHerdr(
       }
     }
     if (request.detach) {
+      await markDetached(live, executionDeps);
       return document(snapshot, activityOf(live.status), {
         model,
         warnings: [...request.warnings, ...ignoredModel],
@@ -305,7 +301,7 @@ export async function promptHerdr(
     if (settled.snapshot.agent === "codex" && request.name != null) {
       await renameCodex(
         live,
-        sessionTitle({ resident, callerId, name: request.name }),
+        sessionTitle({ callerId, name: request.name }),
         settled.snapshot.cwd,
         executionDeps,
       );
@@ -345,7 +341,8 @@ export async function promptHerdr(
       retry: normalized.retry ?? retry,
     });
     if (diagnostic == null) throw preserved;
-    throw preserved.code === "cancelled" && !request.detach && !resident
+    throw preserved.code === "cancelled" && !request.detach &&
+        live?.detached !== true
       ? await closeCancelledPane(preserved, diagnostic, snapshot, deps)
       : await diagnosePane(preserved, diagnostic, deps);
   }
@@ -634,11 +631,7 @@ export async function waitHerdr(
     );
     await renameCodex(
       live,
-      sessionTitle({
-        resident: isResidentName(live.name),
-        callerId,
-        name: options.name,
-      }),
+      sessionTitle({ callerId, name: options.name }),
       snapshot.cwd,
       deps,
     );
@@ -988,7 +981,7 @@ async function startAgent(
   const sessionId = request.snapshot?.sessionId ?? assignedSessionId;
   const name = sessionId == null
     ? temporaryAgentName(callerId)
-    : agentName(sessionId, { ...request, callerId });
+    : agentName(sessionId, callerId);
   const paneId = await allocatePane(request, cwd, callerId, deps, (paneId) => {
     allocated(paneId, cwd);
     located({
@@ -1067,18 +1060,6 @@ async function startAgent(
     deadline,
     deps,
   });
-  if (
-    started != null && request.invocation.agent === "codex" && request.resident
-  ) {
-    // 코덱스는 첫 turn 전 /rename도 이름 색인에 남겨 재개 때 상주 여부를 읽을 수 있다.
-    await submitCodexTitle(
-      name,
-      sessionTitle({ ...request, callerId }),
-      cwd,
-      deps,
-      request.snapshot?.sessionId,
-    );
-  }
   if (started == null) {
     throw new DelegateError(
       "agent_blocked",
@@ -1501,9 +1482,9 @@ function agentFromResult(result: HerdrResult, fallbackName: string): LiveAgent {
   );
 }
 
-// 상주 세션은 close 전까지 남으므로 호출자 워크스페이스에 쌓이지 않게 현재 워크스페이스 바로 다음의 새 워크스페이스에 띄운다.
+// 분리 세션은 close 전까지 남으므로 호출자 워크스페이스에 쌓이지 않게 현재 워크스페이스 바로 다음의 새 워크스페이스에 띄운다.
 // 종속 세션은 호출자 워크스페이스에서 같은 호출자의 종속 세션이 가장 많은 탭을 분할하고, 없으면 새 탭에 띄운다.
-// 탭·워크스페이스 이름은 사용자가 바꿀 수 있어 Herdr 에이전트 이름의 호출자 표시로 찾고, 비면 마지막 pane을 닫을 때 Herdr가 지운다.
+// 탭 이름은 사용자가 바꿀 수 있어 Herdr 에이전트 이름의 호출자 표시로 찾고, 비면 마지막 pane을 닫을 때 Herdr가 지운다.
 async function allocatePane(
   request: HerdrPrompt,
   cwd: string,
@@ -1511,12 +1492,12 @@ async function allocatePane(
   deps: HerdrDeps,
   allocated: (paneId: string) => void,
 ): Promise<string> {
-  if (request.resident) {
+  if (request.detach) {
     const caller = isBackgroundSession(deps.env)
       ? await onlyCallerPane(await listAgents(cwd, deps), callerId, cwd, deps)
       : await currentPane(cwd, deps);
     return await createWorkspaceAfter(workspaceOf(caller), cwd, deps, {
-      label: sessionTitle({ ...request, callerId }),
+      label: sessionTitle({ callerId, name: request.name }),
       allocated,
     });
   }
@@ -1593,6 +1574,25 @@ async function createWorkspaceAfter(
     insert_index: anchor.number,
   });
   return paneId;
+}
+
+// 분리 세션은 다른 호출의 prompt·wait가 닫지 않도록 pane에 표시한다.
+// Herdr에는 pane 보호 기능이 없고, 누가 띄웠는지 기억할 delegate만의 상태는 금지라
+// 살아 있는 pane에 남는 토큰을 쓴다. 이름과 달리 서버 재시작 뒤에는 복원되지 않아
+// 다음 --detach 호출이 다시 붙인다.
+async function markDetached(live: LiveAgent, deps: HerdrDeps): Promise<void> {
+  if (live.paneId == null) return;
+  await socketRequest(deps, "pane.report_metadata", {
+    pane_id: live.paneId,
+    source: detachedToken.key,
+    tokens: { [detachedToken.key]: detachedToken.value },
+  });
+}
+
+const detachedToken = { key: "delegate", value: "detached" } as const;
+
+function isDetached(value: Record<string, unknown>): boolean {
+  return objectValue(value.tokens)[detachedToken.key] === detachedToken.value;
 }
 
 function rootPaneOf(created: HerdrResult): string {
@@ -1720,10 +1720,10 @@ async function panesAttachedToJob(
   const jobId = basename(jobDir);
   const attached: Record<string, unknown>[] = [];
   for (const agent of agents) {
-    const { kind, name, paneId } = liveFrom(agent);
+    const { kind, paneId } = liveFrom(agent);
     if (
       kind !== "claude" || paneId == null || sessionOf(agent) != null ||
-      isDelegatedName(name)
+      isDelegated(agent)
     ) continue;
     const info = objectValue(
       (await json(cwd, deps, ["pane", "process-info", "--pane", paneId]))
@@ -1842,8 +1842,7 @@ async function cleanupAutomatically(
   deadline: number,
   deps: HerdrDeps,
 ): Promise<DelegateWarning[] | undefined> {
-  // 상주 세션은 Herdr에서 계속 보이도록 close로만 정리한다.
-  if (isResidentName(live.name)) return undefined;
+  if (live.detached) return undefined;
   if (live.paneId == null) {
     return [{
       code: "cleanup_failed",
@@ -2090,14 +2089,20 @@ function backgroundWaitDocument(
   options: Parameters<typeof document>[2],
 ): DelegateDocument {
   const { sessionId } = settled.snapshot;
+  // 분리 세션은 띄운 쪽이 close로만 정리하므로 닫는 방법을 안내하지 않는다.
+  const followUps = settled.live.detached
+    ? [`- 결과가 필요하면: wait ${sessionId}`]
+    : [
+      `- 답변이 작업 완료를 기다리는 중이면: wait ${sessionId} --close`,
+      `- 작업을 방치한 최종 답변이면: close ${sessionId}`,
+    ];
   return {
     ...document(settled.snapshot, "quiescent", options),
     error: {
       code: "background_wait",
       message: [
         "백그라운드 작업이 끝나기를 기다리며 응답을 멈췄습니다. pane은 남겨 두었습니다.",
-        `- 답변이 작업 완료를 기다리는 중이면: wait ${sessionId} --close`,
-        `- 작업을 방치한 최종 답변이면: close ${sessionId}`,
+        ...followUps,
       ].join("\n"),
       ...(settled.live.paneId == null
         ? {}
@@ -2152,6 +2157,7 @@ function liveFrom(
       stringValue(pane.workspace_id),
     tabId: stringValue(value.tab_id) ?? stringValue(pane.tab_id),
     paneId: stringValue(value.pane_id) ?? stringValue(pane.pane_id),
+    ...(isDetached(value) ? { detached: true as const } : {}),
   };
 }
 
@@ -2185,15 +2191,11 @@ function sessionOf(value: Record<string, unknown>): string | undefined {
   return stringValue(objectValue(value.agent_session).value);
 }
 
-// Herdr 이름은 32자 제한이라 상주·호출자 표시만큼 session ID를 줄인다.
+// Herdr 이름은 32자 제한이라 호출자 표시만큼 session ID를 줄인다.
 // 호출자 표시는 같은 호출자의 종속 세션을 한 탭에 모으는 기준이다.
-function agentName(
-  sessionId: string,
-  options: { resident: boolean; callerId?: string },
-): string {
+function agentName(sessionId: string, callerId?: string): string {
   const id = compactId(sessionId);
-  if (options.resident) return `dlg-r-${id.slice(0, 26)}`;
-  const caller = callerMark(options.callerId);
+  const caller = callerMark(callerId);
   return caller == null
     ? `dlg-${id.slice(0, 28)}`
     : `dlg-${caller}-${id.slice(0, 15)}`;
@@ -2225,23 +2227,20 @@ function callerCandidates(
   agents: Record<string, unknown>[],
 ): Record<string, unknown>[] {
   return agents.filter((agent) =>
-    sessionOf(agent) != null && !isDelegatedName(stringValue(agent.name))
+    sessionOf(agent) != null && !isDelegated(agent)
   );
 }
 
-function isDelegatedName(name: string | undefined): boolean {
-  return name != null && name.startsWith("dlg-") && !isResidentName(name);
-}
-
-function isResidentName(name: string): boolean {
-  return name.startsWith("dlg-r-");
+// 분리 세션은 스스로 위임을 시작하므로 호출자 후보에 남긴다.
+function isDelegated(agent: Record<string, unknown>): boolean {
+  return nameOf(agent)?.startsWith("dlg-") === true && !isDetached(agent);
 }
 
 function isSessionAgentName(
   name: string | undefined,
   sessionId: string,
 ): boolean {
-  const shown = /^dlg-(?:r-|[0-9a-f]{12}-)?([0-9a-f]{15,})$/.exec(name ?? "")
+  const shown = /^dlg-(?:[0-9a-f]{12}-)?([0-9a-f]{15,})$/.exec(name ?? "")
     ?.[1];
   return shown != null && compactId(sessionId).startsWith(shown);
 }

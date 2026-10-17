@@ -56,6 +56,7 @@ import {
   type AgentOption,
   budgetVariable,
   callerSessionId,
+  defaultDelegationBudget,
   delegationBudget,
   type Effort,
   formatDuration,
@@ -209,13 +210,13 @@ function parser() {
           }),
           1_200_000,
         ),
-        // 상주 관제 세션 전용. 제출·session ID 확정까지만 기다리고
-        // 상주로 표시해 이후 prompt·wait도 pane을 닫지 않는 「턴 종료 후 pane 정리」의
+        // 턴 뒤에도 남겨 둘 관제 세션 전용. 제출·session ID 확정까지만 기다리고
+        // pane에 표시를 남겨 이후 다른 호출의 prompt·wait도 닫지 않는 「턴 종료 후 pane 정리」의
         // 예외가 된다. 알고 쓰는 호출자가 바로 확인하도록 --help에는 용도를 한정해 보이고,
         // 일반 위임이 pane을 쌓지 않도록 일반 위임 세션이 읽는 스킬 문서에는 쓰지 않는다.
         detach: option("--detach", {
           description:
-            message`상주 관제 세션 전용이며 일반 위임에는 사용 금지. 결과를 기다리지 않으려면 호스트의 백그라운드 실행 사용. Herdr 전송 전용. 제출과 session_id 확인 직후 result 없이 반환. 이후 prompt·wait도 pane을 닫지 않아 호출자가 close로 정리. 위임 단계를 줄이지 않음`,
+            message`턴 뒤에도 남겨 둘 관제 세션 전용이며 일반 위임에는 사용 금지. 결과를 기다리지 않으려면 호스트의 백그라운드 실행 사용. Herdr 전송 전용. 새 session은 현재 워크스페이스 바로 다음의 새 워크스페이스에 띄우고, 제출과 session_id 확인 직후 result 없이 반환. 이후 다른 호출의 prompt·wait도 pane을 닫지 않아 호출자가 close로 정리. 자식 셸의 위임 단계는 2로 초기화`,
         }),
       }),
       {
@@ -234,9 +235,9 @@ agent_blocked: 사용자 입력 대기 또는 시작 직후 종료. 확인된 er
 
 - ${sendKeysGuide("<PANE_ID>")}; <PANE_ID>는 error.pane.pane_id
 
-background_wait: Claude가 백그라운드 작업 완료를 기다리며 응답을 멈춤. 본문은 그때까지의 답변이며 pane은 유지. 기다릴 작업이면 wait <SESSION_ID> --close, 방치된 작업이면 close <SESSION_ID>
+background_wait: Claude가 백그라운드 작업 완료를 기다리며 응답을 멈춤. 본문은 그때까지의 답변이며 pane은 유지. 기다릴 작업이면 wait <SESSION_ID> --close, 방치된 작업이면 close <SESSION_ID>. --detach로 띄운 세션은 wait <SESSION_ID>만
 
-cancelled: 호출자 중단(SIGINT·SIGTERM). 확인된 관리 pane을 닫아 작업도 중단. 확인된 session_id로 재개 가능
+cancelled: 호출자 중단(SIGINT·SIGTERM). 확인된 관리 pane을 닫아 작업도 중단하며 --detach로 띄운 세션은 유지. 확인된 session_id로 재개 가능
 
 invalid_native_session: pane이 확인되면 error.pane.pane_id와 현재 화면을 반환. 차단 해소 뒤에도 native 기록 파일이 없을 수 있으므로 pane을 확인하고 필요 시 정리
 
@@ -542,7 +543,6 @@ async function runCommand(
       agent = fallback;
     }
     const model = selectModel(agent, parsed.models);
-    const resident = parsed.detach || snapshot?.resident === true;
     const request = {
       permission: parsed.permission ?? "write",
       cwd: snapshot?.cwd ?? deps.cwd,
@@ -553,9 +553,8 @@ async function runCommand(
       callerId: parsed.callerId ?? callerSessionId(deps.env),
       name: parsed.name,
       resumeSessionId: snapshot?.sessionId,
-      resident,
-      // 상주 조율자는 부모와 대등해 같은 단계를 받는다. 부모 값을 넘지 않아 우회할 수 없다.
-      budget: resident ? budget : budget - 1,
+      // 관제 세션은 사람이 연 세션처럼 처음 단계부터 위임한다.
+      budget: parsed.detach ? defaultDelegationBudget : budget - 1,
     };
     const invocation = agent === "codex"
       ? planCodex(request)
@@ -586,7 +585,6 @@ async function runCommand(
         model,
         warnings,
         detach: parsed.detach,
-        resident: request.resident,
       }, herdrDeps),
     );
   } catch (error) {

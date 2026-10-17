@@ -85,7 +85,6 @@ export function parseClaudeSession(
       >;
     }
     | undefined;
-  let title: string | undefined;
   const turns: ParsedSession["turns"] = [];
   const background = new Set<string>();
 
@@ -102,9 +101,6 @@ export function parseClaudeSession(
     }
     sessionId ??= stringValue(event.sessionId) ?? stringValue(event.session_id);
     cwd ??= stringValue(event.cwd);
-    if (event.type === "custom-title") {
-      title = stringValue(event.customTitle) ?? title;
-    }
     trackBackground(event, background);
     const prompt = humanPrompt(event);
     if (prompt != null) {
@@ -187,7 +183,6 @@ export function parseClaudeSession(
     sessionId,
     cwd,
     turns,
-    title,
   };
 }
 

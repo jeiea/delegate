@@ -18,29 +18,26 @@ export type PlanRequest = {
   resumeSessionId?: string;
   /** 자식 세션의 셸에 넘길 남은 위임 단계 수 */
   budget: number;
-  /** 상주 세션은 pane을 자동으로 닫지 않으며 native 이름에 표시를 남긴다 */
-  resident?: boolean;
 };
 
 export const budgetVariable = "DELEGATE_BUDGET";
 
-export const residentTitleMarker = "[상주]";
-
-/** native 세션 이름. 상주 표시는 재개 때 다시 읽도록 맨 앞에 둔다 */
+/** native 세션 이름 */
 export function sessionTitle(
-  request: Pick<PlanRequest, "resident" | "callerId" | "name">,
+  request: Pick<PlanRequest, "callerId" | "name">,
 ): string {
   return [
-    request.resident ? residentTitleMarker : undefined,
     request.callerId,
     request.name,
   ].filter((part) => part != null && part !== "").join(" ");
 }
 
-/** 사람이 연 세션은 값이 없어 조율자·구현·검토 정도의 두 단계를 허용한다 */
+/** 사람이 연 세션은 값이 없어 구현 위임과 그 검토 위임까지 두 단계를 허용한다 */
+export const defaultDelegationBudget = 2;
+
 export function delegationBudget(env: Record<string, string>): number {
   const value = env[budgetVariable];
-  if (value == null) return 2;
+  if (value == null) return defaultDelegationBudget;
   if (!/^\d+$/.test(value)) {
     throw new DelegateError(
       "usage",
