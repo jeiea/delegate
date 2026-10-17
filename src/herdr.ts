@@ -1384,13 +1384,16 @@ async function waitForQuiescence(
 }
 
 // 입력 대기 화면이어도 끝나지 않은 요청이 있다.
-// 클로드는 백그라운드 작업 완료 알림이 다음 응답을 시작한다. 사용자 중단은
-// 종료 기록을 남기지 않아 백그라운드 작업만 기다린다.
+// 클로드는 백그라운드 작업 완료 알림이 다음 응답을 시작한다. herdr는 화면으로
+// 상태를 판정해 도구 실행 중에도 쉬는 상태로 보고하므로 기록의 실행 중 여부를
+// 따른다. 사용자 중단은 종료 기록 없이 중단 표시만 남겨 미완료 턴을 기다리지 않는다.
 // 코덱스는 /side 갈래 대화가 끝나면 본 요청이 진행 중이어도 쉬는 화면이 된다.
 function turnPending(snapshot: SharedSession): boolean {
   const turn = snapshot.turns.at(-1);
   if (turn == null) return false;
-  if (snapshot.agent === "claude") return turn.background === true;
+  if (snapshot.agent === "claude") {
+    return turn.background === true || turn.inFlight === true;
+  }
   return !turn.completed && !turn.aborted;
 }
 

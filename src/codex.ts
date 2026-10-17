@@ -17,6 +17,7 @@ export type ParsedTurn = {
   completed: boolean;
   aborted?: boolean;
   background?: boolean;
+  inFlight?: boolean;
   start: number;
   end: number;
 };

@@ -1,5 +1,6 @@
 import {
   assertEquals,
+  assertGreater,
   assertMatch,
   assertStringIncludes,
 } from "jsr:@std/assert@1.0.19";
@@ -4731,10 +4732,18 @@ Deno.test("클로드 로그에서 사람의 요청과 최종 답변·공개 도�
   assertEquals(logs.stdout.includes("secret"), false);
 });
 
-Deno.test("진행 중인 클로드 작업에 후속 요청을 보내면 진행 중인 턴에 합쳐져도 후속 결과를 받고 첫 요청 기록을 남긴다", async () => {
+Deno.test("진행 중인 클로드 작업에 후속 요청을 보내면 도구 실행 중인 턴에 합쳐져 화면이 먼저 쉬어도 후속 결과를 받고 첫 요청 기록을 남긴다", async () => {
   await using dir = await createTempDir({ prefix: "delegate-test-" });
   const path = claudePath(dir.path);
-  writeJsonl(path, claudeOpen(`${prefix}첫 요청`));
+  writeJsonl(path, [...claudeOpen(`${prefix}첫 요청`), {
+    type: "assistant",
+    sessionId: claudeId,
+    cwd,
+    requestId: "req-first",
+    message: {
+      content: [{ type: "tool_use", id: "call-first", name: "Bash" }],
+    },
+  }]);
   let now = 0;
   let followUpWritten = false;
   const queued = (kind: string, prompt: string) => ({
@@ -4751,18 +4760,12 @@ Deno.test("진행 중인 클로드 작업에 후속 요청을 보내면 진행 �
   const test = setup(dir.path, "후속 요청", [
     herdr({ agents: [claudeLive("working", 1)] }),
     herdr({ agent: currentClaude("working", 2) }),
+    // 합쳐진 후속 요청은 앞선 도구 결과에 이어질 응답을 기다린다.
     herdr({ agent: claudeLive("done", 3) }),
     herdr({ agent: claudeLive("done", 3) }),
-    herdr({}),
-  ], {
-    env: { HERDR_ENV: "1" },
-    now: () => now,
-    sleep: (ms) => {
-      now += ms;
-      if (!followUpWritten && now > 5_000) {
+    herdr({ agent: claudeLive("done", 4) }, {
+      onStart: () =>
         appendJsonl(path, [
-          queued("task-notification", "<task-notification>작업 완료"),
-          queued("human", `${prefix}후속 요청`),
           {
             type: "assistant",
             sessionId: claudeId,
@@ -4771,6 +4774,27 @@ Deno.test("진행 중인 클로드 작업에 후속 요청을 보내면 진행 �
             message: { content: [{ type: "text", text: "후속 결과" }] },
           },
           { type: "system", subtype: "turn_duration", sessionId: claudeId },
+        ]),
+    }),
+    herdr({ agent: claudeLive("done", 4) }),
+    herdr({}),
+  ], {
+    env: { HERDR_ENV: "1" },
+    now: () => now,
+    sleep: (ms) => {
+      now += ms;
+      if (!followUpWritten && now > 5_000) {
+        appendJsonl(path, [
+          {
+            type: "user",
+            sessionId: claudeId,
+            cwd,
+            message: {
+              content: [{ type: "tool_result", tool_use_id: "call-first" }],
+            },
+          },
+          queued("task-notification", "<task-notification>작업 완료"),
+          queued("human", `${prefix}후속 요청`),
         ]);
         followUpWritten = true;
       }
@@ -4916,6 +4940,89 @@ Deno.test("클로드가 백그라운드 작업을 기다리며 응답을 멈추�
     "pane close",
   ]);
   assertEquals(commands.at(-1), "pane close");
+});
+
+Deno.test("클로드가 도구를 실행하거나 도구 결과에 답하는 동안 화면이 쉬어도 패널을 닫지 않고 답변 뒤 결과를 받는다", async () => {
+  await using dir = await createTempDir({ prefix: "delegate-test-" });
+  const tool = prepareClaudeToolCall(dir.path);
+  const test = setup(dir.path, "촬영", [
+    ...tool.started,
+    // herdr는 화면으로 클로드 상태를 판정해 도구 실행 중에도 쉬는 상태로 보고한다.
+    herdr({ agent: claudeLive("done", 3) }),
+    herdr({ agent: claudeLive("done", 3) }),
+    herdr({ agent: claudeLive("done", 4) }, {
+      onStart: () => tool.append(tool.result),
+    }),
+    herdr({ agent: claudeLive("done", 4) }),
+    herdr({ agent: claudeLive("done", 5) }, {
+      onStart: () =>
+        tool.append(
+          {
+            type: "assistant",
+            requestId: "req-result",
+            message: { content: [{ type: "text", text: "촬영 결과" }] },
+          },
+          { type: "system", subtype: "turn_duration" },
+        ),
+    }),
+    herdr({ agent: claudeLive("done", 5) }),
+    herdr({}),
+  ], { env: { HERDR_ENV: "1" }, sleep: () => Promise.resolve() });
+
+  const prompted = await runDelegate(
+    ["prompt", claudeId, "--caller-id", "caller-1", "--timeout", "60s"],
+    test.deps,
+  );
+  assertEquals(prompted.code, 0);
+  assertStringIncludes(prompted.stdout, "촬영 결과");
+  const commands = test.fake.calls.map((call) =>
+    call.args.slice(0, 2).join(" ")
+  );
+  assertEquals(commands.filter((command) => command === "pane close"), [
+    "pane close",
+  ]);
+  assertEquals(commands.at(-1), "pane close");
+});
+
+Deno.test("클로드 도구 실행을 유저가 중단하면 화면이 먼저 쉬어도 중단 기록이 남은 뒤 패널을 닫는다", async () => {
+  await using dir = await createTempDir({ prefix: "delegate-test-" });
+  const tool = prepareClaudeToolCall(dir.path);
+  let interruptedAt: number | undefined;
+  const test = setup(dir.path, "촬영", [
+    ...tool.started,
+    herdr({ agent: claudeLive("idle", 3) }),
+    herdr({ agent: claudeLive("idle", 3) }),
+    // 중단은 도구 결과와 중단 표시를 남기고 turn_duration은 남기지 않는다.
+    herdr({ agent: claudeLive("idle", 3) }, {
+      onStart: () => {
+        interruptedAt = test.fake.calls.length - 1;
+        tool.append(tool.result, {
+          type: "user",
+          message: {
+            content: [{
+              type: "text",
+              text: "[Request interrupted by user for tool use]",
+            }],
+          },
+        });
+      },
+    }),
+    herdr({ agent: claudeLive("idle", 3) }),
+    herdr({}),
+  ], { env: { HERDR_ENV: "1" }, sleep: () => Promise.resolve() });
+
+  const prompted = await runDelegate(
+    ["prompt", claudeId, "--caller-id", "caller-1", "--timeout", "60s"],
+    test.deps,
+  );
+  assertEquals(prompted.code, 0);
+  const commands = test.fake.calls.map((call) =>
+    call.args.slice(0, 2).join(" ")
+  );
+  assertEquals(commands.filter((command) => command === "pane close"), [
+    "pane close",
+  ]);
+  assertGreater(commands.indexOf("pane close"), interruptedAt!);
 });
 
 Deno.test("코덱스 갈래 대화가 끝나 화면이 쉬어도 위임 요청이 끝나기 전에는 패널을 닫지 않고 완료 뒤 결과를 받는다", async () => {
@@ -6221,4 +6328,38 @@ function completedHerdrResponses(
     herdr({ agent: liveAgent("done", 2) }),
     herdr({}, { onStart: options.onCleanupStart }),
   ];
+}
+
+function prepareClaudeToolCall(root: string) {
+  const path = claudePath(root);
+  const append = (...values: Record<string, unknown>[]) =>
+    appendJsonl(
+      path,
+      values.map((value) => ({ sessionId: claudeId, cwd, ...value })),
+    );
+  writeJsonl(path, claudeOpen("이전 요청"));
+  return {
+    started: [
+      herdr({ agents: [claudeLive("idle", 1)] }),
+      herdr({ agent: currentClaude("working", 2) }, {
+        onStart: () => {
+          appendJsonl(path, claudeOpen(`${prefix}촬영`));
+          append({
+            type: "assistant",
+            requestId: "req-shot",
+            message: {
+              content: [{ type: "tool_use", id: "call-shot", name: "Bash" }],
+            },
+          });
+        },
+      }),
+    ],
+    result: {
+      type: "user",
+      message: {
+        content: [{ type: "tool_result", tool_use_id: "call-shot" }],
+      },
+    },
+    append,
+  };
 }

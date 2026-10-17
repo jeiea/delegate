@@ -79,6 +79,7 @@ export function parseClaudeSession(
     | {
       prompt: string;
       start: number;
+      inFlight?: boolean;
       groups: Map<
         string,
         { texts: string[]; toolUse: boolean; order: number }
@@ -117,9 +118,18 @@ export function parseClaudeSession(
           end: record.start,
         });
       }
-      active = { prompt, start: record.start, groups: new Map() };
+      // 진행 중인 턴에 합쳐진 요청은 앞선 도구 실행이 끝나야 응답한다.
+      const merged = event.type === "attachment" && active?.inFlight === true;
+      active = {
+        prompt,
+        start: record.start,
+        ...(merged ? { inFlight: true } : {}),
+        groups: new Map(),
+      };
       continue;
     }
+    const inFlight = awaitsReply(event);
+    if (active != null && inFlight != null) active.inFlight = inFlight;
     if (
       event.type === "assistant" &&
       active != null &&
@@ -168,6 +178,7 @@ export function parseClaudeSession(
       prompt: active.prompt,
       completed: false,
       ...(background.size === 0 ? {} : { background: true }),
+      ...(active.inFlight === true ? { inFlight: true } : {}),
       start: active.start,
       end: records.at(-1)?.end ?? active.start,
     });
@@ -207,6 +218,23 @@ function trackBackground(
   for (const [, id] of notified.matchAll(/<task-id>([^<]+)<\/task-id>/g)) {
     background.delete(id!);
   }
+}
+
+// 도구 실행이나 도구 결과에 이어질 응답을 기다리면 true, 답변 텍스트나 유저 중단 뒤면 false.
+// 유저 중단은 turn_duration 없이 중단 표시만 남긴다. 생각 블록 기록은 판정을 바꾸지 않는다.
+function awaitsReply(event: Record<string, unknown>): boolean | undefined {
+  if (event.isSidechain === true) return undefined;
+  const content = arrayValue(asObject(event.message).content).map(asObject);
+  const has = (type: string) => content.some((block) => block.type === type);
+  if (event.type === "assistant") {
+    if (has("tool_use")) return true;
+    return has("text") ? false : undefined;
+  }
+  if (event.type !== "user") return undefined;
+  if (has("tool_result")) return true;
+  return messageText(content).startsWith("[Request interrupted by user")
+    ? false
+    : undefined;
 }
 
 // 작업 중 받은 프롬프트는 진행 중인 턴에 합쳐지면 queued_command 첨부로,
