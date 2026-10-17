@@ -32,8 +32,8 @@ export function sessionTitle(
   ].filter((part) => part != null && part !== "").join(" ");
 }
 
-/** 사람이 연 세션은 값이 없어 구현 위임과 그 검토 위임까지 두 단계를 허용한다 */
-export const defaultDelegationBudget = 2;
+/** 사람이 연 세션은 값이 없어 위임받은 세션이 다시 위임하지 못한다. 역할을 모르니 검토가 검토를 여는 사슬도 깊이로만 막는다 */
+export const defaultDelegationBudget = 1;
 
 export function delegationBudget(env: Record<string, string>): number {
   const value = env[budgetVariable];

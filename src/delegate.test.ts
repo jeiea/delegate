@@ -3422,7 +3422,7 @@ Deno.test("관제 세션을 분리 요청으로 시작·후속·재개하면 현
     );
   const startsFresh = (calls: { args: string[] }[]) =>
     calls.filter((call) => call.args[1] === "start").every((call) =>
-      call.args.includes(budgetSettings(2)) &&
+      call.args.includes(budgetSettings(1)) &&
       call.args.includes("--name=detached-caller")
     );
   const marked = {
@@ -3716,7 +3716,7 @@ Deno.test("분리 세션은 다른 호출의 요청·취소·백그라운드 대
   assertEquals(closesPane(closing.fake.calls), true);
 });
 
-Deno.test("남은 위임 단계가 없으면 새 위임을 거절하고 있으면 자식 셸에 한 단계 줄여 넘기며 마지막 단계에도 요청을 그대로 보낸다", async () => {
+Deno.test("남은 위임 단계가 없으면 새 위임을 거절하고 사람이 연 세션의 자식은 더 위임하지 못하게, 단계를 늘려 부른 자식은 한 번 더 위임하게 넘기며 요청은 그대로 보낸다", async () => {
   await using dir = await createTempDir({ prefix: "delegate-test-" });
   for (const budget of ["0", "x"]) {
     const refused = setup(dir.path, "작업", [], {
@@ -3736,7 +3736,7 @@ Deno.test("남은 위임 단계가 없으면 새 위임을 거절하고 있으�
     (await runDelegate(["prompt", "--agent", "claude"], human.deps)).code,
     0,
   );
-  assertEquals(human.fake.calls[0]!.args.includes(budgetSettings(1)), true);
+  assertEquals(human.fake.calls[0]!.args.includes(budgetSettings(0)), true);
   assertEquals(
     human.fake.calls[0]!.args.some((arg) =>
       arg.startsWith("--disallowedTools")
@@ -3745,21 +3745,21 @@ Deno.test("남은 위임 단계가 없으면 새 위임을 거절하고 있으�
   );
   assertEquals(human.fake.calls[0]!.stdin, "작업");
 
-  const last = setup(dir.path, "작업", [directReply("codex")], {
-    env: { DELEGATE_BUDGET: "1" },
+  const extended = setup(dir.path, "작업", [directReply("codex")], {
+    env: { DELEGATE_BUDGET: "2" },
   });
   assertEquals(
-    (await runDelegate(["prompt", "--agent", "codex"], last.deps)).code,
+    (await runDelegate(["prompt", "--agent", "codex"], extended.deps)).code,
     0,
   );
-  const codexArgs = last.fake.calls[0]!.args;
+  const codexArgs = extended.fake.calls[0]!.args;
   assertEquals(
     codexArgs[
-      codexArgs.indexOf('shell_environment_policy.set.DELEGATE_BUDGET="0"') - 1
+      codexArgs.indexOf('shell_environment_policy.set.DELEGATE_BUDGET="1"') - 1
     ],
     "-c",
   );
-  assertEquals(last.fake.calls[0]!.stdin, "작업");
+  assertEquals(extended.fake.calls[0]!.stdin, "작업");
 });
 
 Deno.test("클로드에 요청한 뒤 차단되면 기록이 없어도 패널 화면과 차단 상태를 보여준다", async () => {

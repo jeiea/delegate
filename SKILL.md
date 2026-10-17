@@ -38,7 +38,7 @@ allowed-tools: Bash(herdr *) Bash(deno run *)
 ```sh
 deno run -A {SKILL_BASE_DIR}/src/delegate.ts prompt --help
 
-# 새 작업. DELEGATE_BUDGET=0이면 거절되니 직접 수행
+# 새 작업. 자식 셸 DELEGATE_BUDGET은 호출자 값(없으면 1)에서 1 감소, 0이면 거절되니 직접 수행
 deno run -A {SKILL_BASE_DIR}/src/delegate.ts prompt --agent other --timeout 20m <<'PROMPT'
 <역할, 맥락, 작업, 종료 조건>
 PROMPT
