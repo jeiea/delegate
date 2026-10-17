@@ -193,7 +193,7 @@ Deno.test("연결 실패 진단에서 확인된 코덱스 세션으로 요청을
       herdr({ agent: live }),
       herdr({}),
     ]);
-    const waited = await runDelegate(["wait", codexId], {
+    const waited = await runDelegate(["wait", codexId, "--close"], {
       ...recovered.deps,
       env: test.deps.env,
     });
@@ -791,6 +791,7 @@ Deno.test("진행 중인 코덱스 작업에 후속 요청을 보내면 처음 �
   const waited = await runDelegate([
     "wait",
     codexId,
+    "--close",
     "--caller-id",
     "caller-1",
     "--name",
@@ -1259,7 +1260,7 @@ Deno.test("사용자 응답을 기다리는 작업은 즉시 차단을 알리고
 
   appendJsonl(path, codexCompletion("t", "응답 후 완료"));
   const waitStart = test.fake.calls.length;
-  const waited = await runDelegate(["wait", codexId], test.deps);
+  const waited = await runDelegate(["wait", codexId, "--close"], test.deps);
   assertEquals(waited.code, 0);
   assertStringIncludes(waited.stdout, "intervening_prompts:\n  - 승인 필요");
   assertStringIncludes(waited.stdout, "응답 후 완료");
@@ -3641,8 +3642,6 @@ Deno.test("상주 세션의 새 작업 공간을 옮기지 못하면 빈 패널�
     "resident-caller",
     "--detach",
   ];
-  const closesPane = (calls: { args: string[] }[]) =>
-    calls.some((call) => call.args.join(" ") === "pane close pane-delegate");
 
   const rejected = setup(dir.path, "원장 점검", [
     ...newWorkspaceAllocation(),
@@ -3704,8 +3703,6 @@ Deno.test("코덱스 상주 세션은 실제 요청 전에 상주 이름을 붙�
   };
   const args = ["--caller-id", "resident-caller"];
   const title = "/rename [상주] resident-caller";
-  const closesPane = (calls: { args: string[] }[]) =>
-    calls.some((call) => call.args.join(" ") === "pane close pane-delegate");
   const prompts = (calls: { args: string[] }[]) =>
     calls.filter((call) => call.args[1] === "prompt").map((call) =>
       call.args[3]
@@ -3808,8 +3805,6 @@ Deno.test("상주 세션은 일반 요청·대기·재개가 끝나거나 취소
     },
   };
   const args = ["--caller-id", "resident-caller"];
-  const closesPane = (calls: { args: string[] }[]) =>
-    calls.some((call) => call.args.join(" ") === "pane close pane-delegate");
   const settle = (sequence: number) => [
     herdr({ agent: residentLive("done", sequence) }),
     herdr({ agent: residentLive("done", sequence) }),
@@ -4820,7 +4815,7 @@ Deno.test("진행 중인 클로드 작업에 후속 요청을 보내면 도구 �
   assertEquals(logs.stdout.includes("task-notification"), false);
 });
 
-Deno.test("클로드가 백그라운드 작업을 기다리며 응답을 멈추면 패널을 닫지 않고 작업 완료 뒤 결과를 받는다", async () => {
+Deno.test("클로드가 백그라운드 작업을 기다리며 응답을 멈추면 패널을 남긴 채 중간 답변과 회수 방법을 알리고 정리를 맡은 wait만 작업 완료 뒤 결과를 받고 패널을 닫는다", async () => {
   await using dir = await createTempDir({ prefix: "delegate-test-" });
   const path = claudePath(dir.path);
   const record = (value: Record<string, unknown>) => ({
@@ -4885,24 +4880,69 @@ Deno.test("클로드가 백그라운드 작업을 기다리며 응답을 멈추�
     record({ type: "system", subtype: "turn_duration" }),
   ];
   writeJsonl(path, [...claudeOpen("이전 요청"), ...answer("old", "이전 답변")]);
-  const test = setup(dir.path, "측정", [
-    herdr({ agents: [claudeLive("idle", 1)] }),
-    herdr({ agent: currentClaude("working", 2) }, {
-      onStart: () =>
-        appendJsonl(path, [
-          ...claudeOpen(`${prefix}측정`),
-          ...background("shell", { backgroundTaskId: "bshell" }),
-          ...background("monitor", { taskId: "bmon", persistent: false }),
-          ...background("watch", { taskId: "bwatch", persistent: true }),
-          ...background("agent", {
-            isAsync: true,
-            status: "async_launched",
-            agentId: "aagent",
-          }),
-          notification("aagent", { status: "completed", merged: true }),
-          ...answer("waiting", "측정이 끝나기를 기다립니다"),
-        ]),
-    }),
+  const options = { env: { HERDR_ENV: "1" }, sleep: () => Promise.resolve() };
+  const run = async (args: string[], responses: FakeResponse[]) => {
+    const test = setup(
+      dir.path,
+      args[0] === "prompt" ? "측정" : "",
+      responses,
+      options,
+    );
+    const result = await runDelegate(args, test.deps);
+    return { ...result, closed: closesPane(test.fake.calls) };
+  };
+  const recovery = [
+    `wait ${claudeId} --close`,
+    `close ${claudeId}`,
+  ];
+
+  const prompted = await run(
+    ["prompt", claudeId, "--caller-id", "caller-1", "--timeout", "60s"],
+    [
+      herdr({ agents: [claudeLive("idle", 1)] }),
+      herdr({ agent: currentClaude("working", 2) }, {
+        onStart: () =>
+          appendJsonl(path, [
+            ...claudeOpen(`${prefix}측정`),
+            ...background("shell", { backgroundTaskId: "bshell" }),
+            ...background("monitor", { taskId: "bmon", persistent: false }),
+            ...background("watch", { taskId: "bwatch", persistent: true }),
+            ...background("agent", {
+              isAsync: true,
+              status: "async_launched",
+              agentId: "aagent",
+            }),
+            notification("aagent", { status: "completed", merged: true }),
+            record({
+              type: "attachment",
+              attachment: {
+                type: "queued_command",
+                commandMode: "prompt",
+                origin: { kind: "human" },
+                prompt: "측정 범위 추가",
+              },
+            }),
+            ...answer("waiting", "측정이 끝나기를 기다립니다"),
+          ]),
+      }),
+      herdr({ agent: claudeLive("done", 3) }),
+      herdr({ agent: claudeLive("done", 3) }),
+    ],
+  );
+  assertEquals(prompted.code, 4, prompted.stdout);
+  assertStringIncludes(prompted.stdout, "code: background_wait");
+  assertStringIncludes(prompted.stdout, "측정이 끝나기를 기다립니다");
+  assertStringIncludes(
+    prompted.stdout,
+    "intervening_prompts:\n  - 측정 범위 추가",
+  );
+  for (const command of recovery) {
+    assertStringIncludes(prompted.stdout, command);
+  }
+  assertEquals(prompted.closed, false);
+
+  const deferred = await run(["wait", claudeId, "--close"], [
+    herdr({ agents: [claudeLive("done", 3)] }),
     herdr({ agent: claudeLive("done", 3) }),
     herdr({ agent: claudeLive("done", 3) }),
     herdr({ agent: claudeLive("working", 4) }, {
@@ -4912,6 +4952,15 @@ Deno.test("클로드가 백그라운드 작업을 기다리며 응답을 멈추�
           ...answer("event", "중간 이벤트 확인"),
         ]),
     }),
+    herdr({ agent: claudeLive("done", 5) }),
+    herdr({ agent: claudeLive("done", 5) }),
+  ]);
+  assertEquals(deferred.code, 4);
+  assertStringIncludes(deferred.stdout, "중간 이벤트 확인");
+  assertEquals(deferred.closed, false);
+
+  const unowned = await run(["wait", claudeId], [
+    herdr({ agents: [claudeLive("done", 5)] }),
     herdr({ agent: claudeLive("done", 5) }),
     herdr({ agent: claudeLive("done", 5) }),
     // 재개 응답이 두 확인 사이에 끝나 working 상태를 관찰하지 못한다.
@@ -4924,22 +4973,20 @@ Deno.test("클로드가 백그라운드 작업을 기다리며 응답을 멈추�
         ]),
     }),
     herdr({ agent: claudeLive("done", 7) }),
-    herdr({}),
-  ], { env: { HERDR_ENV: "1" }, sleep: () => Promise.resolve() });
-
-  const prompted = await runDelegate(
-    ["prompt", claudeId, "--caller-id", "caller-1", "--timeout", "60s"],
-    test.deps,
-  );
-  assertEquals(prompted.code, 0);
-  assertStringIncludes(prompted.stdout, "측정 결과");
-  const commands = test.fake.calls.map((call) =>
-    call.args.slice(0, 2).join(" ")
-  );
-  assertEquals(commands.filter((command) => command === "pane close"), [
-    "pane close",
   ]);
-  assertEquals(commands.at(-1), "pane close");
+  assertEquals(unowned.code, 0, unowned.stdout);
+  assertStringIncludes(unowned.stdout, "측정 결과");
+  assertEquals(unowned.closed, false);
+
+  const closing = await run(["wait", claudeId, "--close"], [
+    herdr({ agents: [claudeLive("done", 7)] }),
+    herdr({ agent: claudeLive("done", 7) }),
+    herdr({ agent: claudeLive("done", 7) }),
+    herdr({}),
+  ]);
+  assertEquals(closing.code, 0, closing.stdout);
+  assertStringIncludes(closing.stdout, "측정 결과");
+  assertEquals(closing.closed, true);
 });
 
 Deno.test("클로드가 도구를 실행하거나 도구 결과에 답하는 동안 화면이 쉬어도 패널을 닫지 않고 답변 뒤 결과를 받는다", async () => {
@@ -5729,7 +5776,7 @@ Deno.test("패널 부재 메시지가 정확히 일치할 때만 세션을 한 �
               "60s",
             ]
             : command === "wait"
-            ? ["wait", codexId, "--timeout", "60s"]
+            ? ["wait", codexId, "--close", "--timeout", "60s"]
             : ["close", codexId],
           test.deps,
         );
@@ -6362,4 +6409,10 @@ function prepareClaudeToolCall(root: string) {
     },
     append,
   };
+}
+
+function closesPane(calls: { args: string[] }[]): boolean {
+  return calls.some((call) =>
+    call.args.join(" ") === "pane close pane-delegate"
+  );
 }

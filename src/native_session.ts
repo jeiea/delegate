@@ -139,9 +139,8 @@ export function outcomeAfter(
   boundary: PromptBoundary,
 ): PromptOutcome {
   const turns = snapshot.turns.filter((turn) => turn.start >= boundary.offset);
-  const resultIndex = turns.findLastIndex((turn) =>
-    turn.completed && turn.assistant != null
-  );
+  // 미완료 턴의 답변은 클로드가 백그라운드 작업을 기다리며 멈춘 중간 답변뿐이다.
+  const resultIndex = turns.findLastIndex((turn) => turn.assistant != null);
   if (resultIndex < 0) return {};
   const concluded = turns.slice(0, resultIndex + 1);
   const interveningPrompts = concluded.slice(

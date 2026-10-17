@@ -46,6 +46,9 @@ deno run -A {SKILL_BASE_DIR}/src/delegate.ts prompt <SESSION_ID> <<'PROMPT'
 <변경점, 후속 작업, 종료 조건>
 PROMPT
 
-# 진단·연결 유실 뒤 회수·중단
-deno run -A {SKILL_BASE_DIR}/src/delegate.ts <status|wait|logs|close> <SESSION_ID>
+# 진단·중단
+deno run -A {SKILL_BASE_DIR}/src/delegate.ts <status|logs|close> <SESSION_ID>
+
+# 연결 유실 뒤 회수·정리
+deno run -A {SKILL_BASE_DIR}/src/delegate.ts wait <SESSION_ID> --close
 ```

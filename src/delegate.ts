@@ -105,6 +105,7 @@ type ParsedCommand = PromptOptions | {
   timeoutMs: number;
   callerId?: string;
   name?: string;
+  close: boolean;
 } | {
   kind: "logs";
   target: string;
@@ -233,6 +234,8 @@ agent_blocked: 사용자 입력 대기 또는 시작 직후 종료. 확인된 er
 
 - ${sendKeysGuide("<PANE_ID>")}; <PANE_ID>는 error.pane.pane_id
 
+background_wait: Claude가 백그라운드 작업 완료를 기다리며 응답을 멈춤. 본문은 그때까지의 답변이며 pane은 유지. 기다릴 작업이면 wait <SESSION_ID> --close, 방치된 작업이면 close <SESSION_ID>
+
 cancelled: 호출자 중단(SIGINT·SIGTERM). 확인된 관리 pane을 닫아 작업도 중단. 확인된 session_id로 재개 가능
 
 invalid_native_session: pane이 확인되면 error.pane.pane_id와 현재 화면을 반환. 차단 해소 뒤에도 native 기록 파일이 없을 수 있으므로 pane을 확인하고 필요 시 정리
@@ -303,11 +306,15 @@ last_activity_at과 last_activity는 서로 다른 기록을 가리킬 수 있�
           description:
             message`Codex 전용. prompt가 중단돼 이름을 못 붙였으면 같은 값 재전달`,
         })),
+        close: option("--close", {
+          description:
+            message`완료 뒤 관리 pane 정리를 이 호출이 맡음. 다시 background_wait로 끝나면 정리 보류. Herdr 전용`,
+        }),
       }),
       {
         brief: message`실행 중 session 완료 대기`,
         description:
-          message`호출 연결 유실 뒤 결과 회수용. Herdr 창이 없으면 원본 기록의 최신 요청 종료를 대기. 최신 요청이 이미 완료됐고 부분 기록이 없으면 즉시 결과 반환. 진행·부분 기록 앞의 이전 완료 결과는 반환하지 않으며, 종료 기록이 없으면 제한 시간까지 대기. 생존은 unknown 유지. 대기 시작 뒤 추가된 사람 prompt는 intervening_prompts, 마지막 result는 마크다운 본문으로 반환. Herdr 창이 있으면 성공 후 관리 pane 자동 정리. 오류 의미는 prompt와 동일하나 cancelled는 pane 유지`,
+          message`호출 연결 유실 뒤 결과 회수용. Herdr 창이 없으면 원본 기록의 최신 요청 종료를 대기. 최신 요청이 이미 완료됐고 부분 기록이 없으면 즉시 결과 반환. 진행·부분 기록 앞의 이전 완료 결과는 반환하지 않으며, 종료 기록이 없으면 제한 시간까지 대기. 생존은 unknown 유지. 대기 시작 뒤 추가된 사람 prompt는 intervening_prompts, 마지막 result는 마크다운 본문으로 반환. Herdr 창이 있으면 --close일 때만 성공 후 관리 pane 정리. 오류 의미는 prompt와 동일하나 cancelled는 pane 유지`,
       },
     ),
     (value) => ({ kind: "wait" as const, ...value }),
@@ -449,7 +456,7 @@ async function runCommand(
         );
       }
       if (parsed.kind === "logs") {
-        return success({
+        return documentResult({
           session_id: snapshot.sessionId,
           agent: snapshot.agent,
           observation: snapshot.observation,
@@ -457,9 +464,11 @@ async function runCommand(
         });
       }
       if (deps.env.HERDR_ENV !== "1") {
-        if (parsed.kind === "status") return success(statusDirect(snapshot));
+        if (parsed.kind === "status") {
+          return documentResult(statusDirect(snapshot));
+        }
         if (parsed.kind === "wait") {
-          return success(
+          return documentResult(
             await waitDirect(snapshot, {
               ...herdrDeps,
               timeoutMs: parsed.timeoutMs,
@@ -469,12 +478,12 @@ async function runCommand(
         return closeDirect();
       }
       if (parsed.kind === "status") {
-        return success(await statusHerdr(snapshot, herdrDeps));
+        return documentResult(await statusHerdr(snapshot, herdrDeps));
       }
       if (parsed.kind === "wait") {
-        return success(await waitHerdr(snapshot, parsed, herdrDeps));
+        return documentResult(await waitHerdr(snapshot, parsed, herdrDeps));
       }
-      return success(await closeHerdr(snapshot, herdrDeps));
+      return documentResult(await closeHerdr(snapshot, herdrDeps));
     }
 
     const budget = delegationBudget(deps.env);
@@ -565,7 +574,7 @@ async function runCommand(
         { model, warnings },
       );
     }
-    return success(
+    return documentResult(
       await promptHerdr({
         invocation,
         cwd: request.cwd,
@@ -766,7 +775,7 @@ async function executeDirect(
       { warnings: started.warnings },
     );
   }
-  return success({
+  return documentResult({
     session_id: parsed.sessionId,
     agent: invocation.agent,
     ...(started.model == null ? {} : { model: started.model }),
@@ -818,8 +827,12 @@ function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
-function success(document: DelegateDocument) {
-  return { stdout: renderDocument(document), stderr: "", code: 0 };
+function documentResult(document: DelegateDocument) {
+  return {
+    stdout: renderDocument(document),
+    stderr: "",
+    code: document.error == null ? 0 : exitCode(document.error.code),
+  };
 }
 
 function failure(

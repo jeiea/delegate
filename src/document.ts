@@ -35,6 +35,7 @@ export type PublicErrorCode =
   | "agent_failed"
   | "herdr_failed"
   | "agent_blocked"
+  | "background_wait"
   | "cleanup_failed"
   | "timeout"
   | "cancelled";
@@ -123,7 +124,7 @@ export function exitCode(code: PublicErrorCode): number {
     code === "transport_unavailable" ||
     code === "caller_session_unavailable" || code === "session_not_found"
   ) return 3;
-  if (code === "agent_blocked") return 4;
+  if (code === "agent_blocked" || code === "background_wait") return 4;
   if (code === "timeout") return 6;
   if (code === "cancelled") return 130;
   return 5;

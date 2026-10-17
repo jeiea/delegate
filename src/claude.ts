@@ -82,11 +82,10 @@ export function parseClaudeSession(
       inFlight?: boolean;
       groups: Map<
         string,
-        { texts: string[]; toolUse: boolean; order: number }
+        { texts: string[]; toolUse: boolean }
       >;
     }
     | undefined;
-  let groupOrder = 0;
   let title: string | undefined;
   const turns: ParsedSession["turns"] = [];
   const background = new Set<string>();
@@ -137,10 +136,10 @@ export function parseClaudeSession(
     ) {
       const requestId = stringValue(event.requestId) ??
         stringValue(asObject(event.message).id) ??
-        `request-${groupOrder}`;
+        `request-${active.groups.size}`;
       let group = active.groups.get(requestId);
       if (group == null) {
-        group = { texts: [], toolUse: false, order: groupOrder++ };
+        group = { texts: [], toolUse: false };
         active.groups.set(requestId, group);
       }
       for (const blockValue of arrayValue(asObject(event.message).content)) {
@@ -159,13 +158,10 @@ export function parseClaudeSession(
       active != null &&
       background.size === 0
     ) {
-      const final = [...active.groups.values()]
-        .filter((group) => !group.toolUse && group.texts.length > 0)
-        .sort((left, right) => left.order - right.order)
-        .at(-1);
+      const assistant = finalAnswer(active.groups);
       turns.push({
         prompt: active.prompt,
-        ...(final == null ? {} : { assistant: final.texts.join("\n") }),
+        ...(assistant == null ? {} : { assistant }),
         completed: true,
         start: active.start,
         end: record.end,
@@ -174,8 +170,13 @@ export function parseClaudeSession(
     }
   }
   if (active != null) {
+    // 백그라운드 작업을 기다리며 멈춘 턴의 중간 답변은 호출자가 계속 기다릴지 판단하는 근거다.
+    const assistant = background.size === 0
+      ? undefined
+      : finalAnswer(active.groups);
     turns.push({
       prompt: active.prompt,
+      ...(assistant == null ? {} : { assistant }),
       completed: false,
       ...(background.size === 0 ? {} : { background: true }),
       ...(active.inFlight === true ? { inFlight: true } : {}),
@@ -189,6 +190,14 @@ export function parseClaudeSession(
     turns,
     title,
   };
+}
+
+function finalAnswer(
+  groups: Map<string, { texts: string[]; toolUse: boolean }>,
+): string | undefined {
+  return [...groups.values()]
+    .filter((group) => !group.toolUse && group.texts.length > 0)
+    .at(-1)?.texts.join("\n");
 }
 
 // 작업을 기다리는 중 받은 후속 요청도 작업이 끝나야 완료된다.

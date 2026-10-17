@@ -295,6 +295,7 @@ export async function promptHerdr(
       live,
       deadline,
       executionDeps,
+      { since: boundaryCursor },
     );
     const offset = boundaryCursor != null &&
         boundaryCursor.path === settled.snapshot.cursor.path &&
@@ -309,6 +310,18 @@ export async function promptHerdr(
         executionDeps,
       );
     }
+    const outcome = outcomeAfter(settled.snapshot, {
+      offset,
+      excludeInitialTurn: true,
+    });
+    if (settled.background) {
+      return backgroundWaitDocument(settled, {
+        outcome,
+        model,
+        warnings: [...request.warnings, ...ignoredModel],
+        retry,
+      });
+    }
     const warnings = await cleanupAutomatically(
       settled.live,
       settled.snapshot,
@@ -319,10 +332,7 @@ export async function promptHerdr(
       settled.snapshot,
       "quiescent",
       {
-        outcome: outcomeAfter(settled.snapshot, {
-          offset,
-          excludeInitialTurn: true,
-        }),
+        outcome,
         model,
         warnings: [...request.warnings, ...ignoredModel, ...warnings ?? []],
         retry,
@@ -600,6 +610,7 @@ export async function waitHerdr(
     timeoutMs: number;
     callerId?: string;
     name?: string;
+    close: boolean;
   },
   deps: HerdrDeps,
 ): Promise<DelegateDocument> {
@@ -613,7 +624,9 @@ export async function waitHerdr(
   const deadline = deps.now() + options.timeoutMs;
   const boundaryCursor = snapshot.cursor;
   const boundary = latestHumanBoundary(snapshot);
-  const settled = await waitForQuiescence(snapshot, live, deadline, deps);
+  const settled = await waitForQuiescence(snapshot, live, deadline, deps, {
+    since: snapshot.cursor,
+  });
   if (snapshot.agent === "codex" && options.name != null) {
     const callerId = await withSessionError(
       resolveCallerId(options.callerId, deps, snapshot.cwd),
@@ -630,25 +643,27 @@ export async function waitHerdr(
       deps,
     );
   }
-  const warnings = await cleanupAutomatically(
-    settled.live,
-    settled.snapshot,
-    deadline,
-    deps,
-  );
+  const outcome = outcomeAfter(settled.snapshot, {
+    ...boundary,
+    offset: boundaryCursor.path === settled.snapshot.cursor.path &&
+        boundaryCursor.identity === settled.snapshot.cursor.identity
+      ? boundary.offset
+      : 0,
+  });
+  if (settled.background) return backgroundWaitDocument(settled, { outcome });
+  // 같은 세션을 여러 호출이 기다릴 수 있어 pane은 닫기를 맡은 wait만 닫는다.
+  const warnings = options.close
+    ? await cleanupAutomatically(
+      settled.live,
+      settled.snapshot,
+      deadline,
+      deps,
+    )
+    : undefined;
   return document(
     settled.snapshot,
     "quiescent",
-    {
-      outcome: outcomeAfter(settled.snapshot, {
-        ...boundary,
-        offset: boundaryCursor.path === settled.snapshot.cursor.path &&
-            boundaryCursor.identity === settled.snapshot.cursor.identity
-          ? boundary.offset
-          : 0,
-      }),
-      warnings,
-    },
+    { outcome, warnings },
   );
 }
 
@@ -1286,7 +1301,8 @@ async function waitForQuiescence(
   live: LiveAgent,
   deadline: number,
   deps: HerdrDeps,
-): Promise<{ snapshot: SharedSession; live: LiveAgent }> {
+  { since }: { since?: NativeCursor } = {},
+): Promise<{ snapshot: SharedSession; live: LiveAgent; background: boolean }> {
   let snapshot = initial;
   while (true) {
     ensureTime(deadline, deps, snapshot.sessionId);
@@ -1372,7 +1388,19 @@ async function waitForQuiescence(
     snapshot = refreshed;
     if (!settled) continue;
     if (!turnPending(refreshed)) {
-      return { snapshot: refreshed, live: checked };
+      return { snapshot: refreshed, live: checked, background: false };
+    }
+    // 백그라운드 작업만 남아 쉬면 중간 답변으로 반환하고 pane은 남긴다.
+    // 닫으면 기다리던 작업이 죽고 호출자는 오지 않을 결과를 기다린다(2881867).
+    // 끝까지 기다리면 방치된 작업 때문에 --timeout까지 멈추고, 기록만으로는
+    // 기다리는 작업과 방치된 작업을 구분할 수 없다. 계속 기다릴지는 답변을 읽는
+    // 호출자가 wait --close로 정하며, 이 경우가 prompt 1회 회수 요구의 예외다.
+    // 이미 쉬던 세션의 wait는 완료 알림 뒤 응답으로 기록이 늘 때까지 기다린다.
+    if (
+      awaitsBackgroundOnly(refreshed) &&
+      (since == null || !cursorEquals(since, refreshed.cursor))
+    ) {
+      return { snapshot: refreshed, live: checked, background: true };
     }
     // working 대기는 확인과 등록 사이에 끝난 응답을 놓치므로 기록을 다시 확인한다.
     await pause(
@@ -1395,6 +1423,12 @@ function turnPending(snapshot: SharedSession): boolean {
     return turn.background === true || turn.inFlight === true;
   }
   return !turn.completed && !turn.aborted;
+}
+
+function awaitsBackgroundOnly(snapshot: SharedSession): boolean {
+  const turn = snapshot.turns.at(-1);
+  return snapshot.agent === "claude" && turn?.background === true &&
+    turn.inFlight !== true;
 }
 
 async function findLiveAgent(
@@ -2049,6 +2083,27 @@ function parseCommandError(stderr: string): { code: string; message: string } {
       message: stderr.trim() || "Herdr 명령 실패",
     };
   }
+}
+
+function backgroundWaitDocument(
+  settled: { snapshot: SharedSession; live: LiveAgent },
+  options: Parameters<typeof document>[2],
+): DelegateDocument {
+  const { sessionId } = settled.snapshot;
+  return {
+    ...document(settled.snapshot, "quiescent", options),
+    error: {
+      code: "background_wait",
+      message: [
+        "백그라운드 작업이 끝나기를 기다리며 응답을 멈췄습니다. pane은 남겨 두었습니다.",
+        `- 답변이 작업 완료를 기다리는 중이면: wait ${sessionId} --close`,
+        `- 작업을 방치한 최종 답변이면: close ${sessionId}`,
+      ].join("\n"),
+      ...(settled.live.paneId == null
+        ? {}
+        : { pane: { pane_id: settled.live.paneId } }),
+    },
+  };
 }
 
 function document(
