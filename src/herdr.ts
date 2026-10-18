@@ -2090,26 +2090,17 @@ async function socketRequest(
   const signal = executionSignal(deps);
   let response: Record<string, unknown>;
   try {
-    const conn = await Deno.connect({
-      transport: "unix",
-      path: deps.env.HERDR_SOCKET_PATH!,
+    signal.throwIfAborted();
+    const request = JSON.stringify({
+      id: `delegate:${method}`,
+      method,
+      params,
     });
-    const lines = conn.readable.pipeThrough(new TextDecoderStream())
-      .pipeThrough(new TextLineStream()).getReader();
-    const close = () => void lines.cancel();
-    signal.addEventListener("abort", close, { once: true });
-    try {
-      signal.throwIfAborted();
-      await conn.write(
-        new TextEncoder().encode(
-          `${JSON.stringify({ id: `delegate:${method}`, method, params })}\n`,
-        ),
-      );
-      response = objectValue(JSON.parse((await lines.read()).value ?? ""));
-    } finally {
-      signal.removeEventListener("abort", close);
-      await lines.cancel();
-    }
+    const line = Deno.build.os === "windows"
+      ? await requestWindowsPipe(deps, request)
+      : await requestUnixSocket(deps, request);
+    signal.throwIfAborted();
+    response = objectValue(JSON.parse(line));
   } catch (error) {
     throw interruptionError(deps) ?? new DelegateError(
       "herdr_failed",
@@ -2123,6 +2114,49 @@ async function socketRequest(
     );
   }
   return objectValue(response.result);
+}
+
+async function requestWindowsPipe(
+  deps: HerdrDeps,
+  request: string,
+): Promise<string> {
+  // Deno.open의 차단 읽기는 파일을 닫아도 OS 핸들을 붙잡으므로 취소 시 프로세스까지 종료한다.
+  // Deno 2.9.7은 세부 권한에서 파이프 경로를 변형하므로 공식 실행과 같은 -A가 필요하다.
+  const output = await deps.exec(Deno.execPath(), [
+    "run",
+    "-A",
+    "--no-config",
+    new URL("./herdr_pipe.ts", import.meta.url).href,
+    deps.env.HERDR_SOCKET_PATH!,
+    request,
+  ], { cwd: Deno.cwd(), env: deps.env, signal: executionSignal(deps) });
+  if (output.code !== 0) {
+    throw new Error(output.stderr.trim() || "Herdr 파이프 요청 실패");
+  }
+  return output.stdout;
+}
+
+async function requestUnixSocket(
+  deps: HerdrDeps,
+  request: string,
+): Promise<string> {
+  const signal = executionSignal(deps);
+  const conn = await Deno.connect({
+    transport: "unix",
+    path: deps.env.HERDR_SOCKET_PATH!,
+  });
+  const lines = conn.readable.pipeThrough(new TextDecoderStream())
+    .pipeThrough(new TextLineStream()).getReader();
+  const close = () => void lines.cancel();
+  signal.addEventListener("abort", close, { once: true });
+  try {
+    signal.throwIfAborted();
+    await conn.write(new TextEncoder().encode(`${request}\n`));
+    return (await lines.read()).value ?? "";
+  } finally {
+    signal.removeEventListener("abort", close);
+    await lines.cancel();
+  }
 }
 
 function parseCommandError(stderr: string): { code: string; message: string } {

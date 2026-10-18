@@ -3449,7 +3449,7 @@ Deno.test("클로드 시작에 승인이 필요하면 기록이 생기기 전에
 
 Deno.test("관제 세션을 분리 요청으로 시작·후속·재개하면 현재 작업 공간 바로 다음의 새 작업 공간에 띄워 분리 표시를 남기고 자식 위임 단계를 처음부터 주며 제출과 세션 확인까지만 기다리고 전달이 불확실하거나 호출자가 중단돼도 패널을 남긴다", async () => {
   await using dir = await createTempDir({ prefix: "delegate-test-" });
-  await using socket = fakeHerdrSocket(join(dir.path, "herdr.sock"));
+  await using socket = await fakeHerdrSocket(join(dir.path, "herdr.sock"));
   let now = 0;
   const clock = {
     now: () => now,
@@ -3596,12 +3596,14 @@ Deno.test("관제 세션을 분리 요청으로 시작·후속·재개하면 현
   assertEquals(requests().at(-1), marked);
 });
 
-Deno.test("분리 세션의 새 작업 공간을 옮기지 못하면 빈 패널을 닫고 그사이 호출자가 중단하면 기다리지 않고 중단을 알리며 패널을 남긴다", async () => {
+Deno.test("분리 세션의 작업 공간 이동이 거부되거나 응답 기한이 지나면 빈 패널을 닫고 호출자가 중단하면 연결만 정리하고 패널을 남긴다", async () => {
   await using dir = await createTempDir({ prefix: "delegate-test-" });
   const controller = new AbortController();
-  await using _socket = fakeHerdrSocket(join(dir.path, "herdr.sock"), [
-    { error: { code: "workspace_move_failed", message: "이동 거부" } },
+  const refusedMessage = `이동 거부 ${"한글".repeat(2000)} 끝`;
+  await using _socket = await fakeHerdrSocket(join(dir.path, "herdr.sock"), [
+    { error: { code: "workspace_move_failed", message: refusedMessage } },
     { hang: true, onRequest: () => controller.abort() },
+    { hang: true },
   ]);
   const env = { HERDR_ENV: "1" };
   const args = [
@@ -3619,7 +3621,7 @@ Deno.test("분리 세션의 새 작업 공간을 옮기지 못하면 빈 패널�
   ], { env });
   const failure = await runDelegate(args, rejected.deps);
   assertEquals(failure.code, exitCode("herdr_failed"), failure.stdout);
-  assertStringIncludes(failure.stdout, "이동 거부");
+  assertStringIncludes(failure.stdout, refusedMessage);
   assertEquals(closesPane(rejected.fake.calls), true);
 
   const interrupted = setup(dir.path, "원장 점검", [
@@ -3629,6 +3631,18 @@ Deno.test("분리 세션의 새 작업 공간을 옮기지 못하면 빈 패널�
   const cancelled = await runDelegate(args, interrupted.deps);
   assertEquals(cancelled.code, 130, cancelled.stdout);
   assertEquals(closesPane(interrupted.fake.calls), false);
+
+  const stalled = setup(dir.path, "원장 점검", [
+    ...newWorkspaceAllocation(),
+    herdr({}),
+  ], { env });
+  const timedOut = await runDelegate(
+    [...args, "--timeout", "2s"],
+    stalled.deps,
+  );
+  assertEquals(timedOut.code, exitCode("timeout"), timedOut.stdout);
+  assertEquals(closesPane(stalled.fake.calls), true);
+  assertEquals(_socket.requests.length, 3);
 });
 
 Deno.test("분리 요청은 직접 실행과 함께 쓰면 실행 전에 거부되고 알고 쓰는 호출자를 위해 도움말에만 드러난다", async () => {
@@ -5904,6 +5918,10 @@ function setup(
   } = {},
 ) {
   const fake = fakeExec(responses);
+  const exec: typeof denoExec = (cmd, args, options) =>
+    cmd === Deno.execPath()
+      ? denoExec(cmd, args, options)
+      : fake.exec(cmd, args, options);
   const bin = Deno.makeTempDirSync({ dir: root, prefix: "bin-" });
   for (const agent of options.installed ?? ["codex", "claude"]) {
     const path = join(
@@ -5916,12 +5934,13 @@ function setup(
   return {
     fake,
     deps: {
-      exec: fake.exec,
+      exec,
       env: {
         PATH: bin,
         HOME: root,
         CODEX_HOME: join(root, "codex"),
         CLAUDE_CONFIG_DIR: join(root, "claude"),
+        DENO_DIR: join(root, "deno"),
         HERDR_SOCKET_PATH: join(root, "herdr.sock"),
         ...options.env,
       },

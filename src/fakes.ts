@@ -1,5 +1,8 @@
 import type { Exec, ExecResult } from "./process.ts";
 import { TextLineStream } from "jsr:@std/streams@1.0.17/text-line-stream";
+import { once } from "node:events";
+import { createServer, type Socket } from "node:net";
+import { Readable } from "node:stream";
 
 export type FakeCall = {
   cmd: string;
@@ -76,18 +79,17 @@ export type FakeSocketReply = {
   onRequest?: () => void;
 };
 
-export function fakeHerdrSocket(
+export async function fakeHerdrSocket(
   path: string,
   replies: readonly FakeSocketReply[] = [],
-): {
+): Promise<{
   requests: FakeSocketRequest[];
   [Symbol.asyncDispose](): Promise<void>;
-} {
-  const listener = Deno.listen({ transport: "unix", path });
+}> {
   const requests: FakeSocketRequest[] = [];
   const served: Promise<void>[] = [];
-  const serve = async (conn: Deno.Conn) => {
-    const lines = conn.readable.pipeThrough(new TextDecoderStream())
+  const serve = async (conn: Socket) => {
+    const lines = Readable.toWeb(conn).pipeThrough(new TextDecoderStream())
       .pipeThrough(new TextLineStream()).getReader();
     try {
       const request = JSON.parse(
@@ -104,22 +106,27 @@ export function fakeHerdrSocket(
       const body = reply.error == null
         ? { id: request.id, result: {} }
         : { id: request.id, error: reply.error };
-      await conn.write(
-        new TextEncoder().encode(`${JSON.stringify(body)}\n`),
+      await new Promise<void>((resolve, reject) =>
+        conn.write(
+          `${JSON.stringify(body)}\n`,
+          (error) => error == null ? resolve() : reject(error),
+        )
       );
+      // 서버는 응답 뒤에도 연결을 유지하므로 클라이언트가 닫아야 끝난다.
+      await lines.read();
     } finally {
       await lines.cancel();
     }
   };
-  const accepting = (async () => {
-    for await (const conn of listener) served.push(serve(conn));
-  })();
+  const listener = createServer((conn) => served.push(serve(conn)));
+  listener.listen(Deno.build.os === "windows" ? `\\\\.\\pipe\\${path}` : path);
+  await once(listener, "listening");
   return {
     requests,
     async [Symbol.asyncDispose]() {
       listener.close();
-      await accepting.catch(() => {});
-      await Promise.allSettled(served);
+      await once(listener, "close");
+      await Promise.all(served);
     },
   };
 }
