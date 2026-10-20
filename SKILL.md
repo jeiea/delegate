@@ -11,6 +11,7 @@ allowed-tools: Bash(herdr *) Bash(deno run *)
   - 클로드: `claude-fable-5-1`, `claude-opus-5-5`, `claude-sonnet-5`
   - 코덱스: `gpt-6.1-sol`, `gpt-6-astra`, `gpt-6-luna`
 - 이전 호출과 관련 있으면 `<SESSION_ID>`로 후속 요청
+- 결과를 회수하지 않을 별도 세션은 `prompt --detach` 사용
 - 두 에이전트 모두 호출 불가 시 서브에이전트 허용
 
 # 위임 내용

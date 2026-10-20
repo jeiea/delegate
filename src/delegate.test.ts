@@ -3645,7 +3645,7 @@ Deno.test("분리 세션의 작업 공간 이동이 거부되거나 응답 기�
   assertEquals(_socket.requests.length, 3);
 });
 
-Deno.test("분리 요청은 직접 실행과 함께 쓰면 실행 전에 거부되고 알고 쓰는 호출자를 위해 도움말에만 드러난다", async () => {
+Deno.test("분리 요청은 직접 실행과 함께 쓰면 실행 전에 거부되고 스킬과 도움말에 드러난다", async () => {
   await using dir = await createTempDir({ prefix: "delegate-test-" });
   const base = setup(dir.path, "작업");
   for (
@@ -3659,7 +3659,7 @@ Deno.test("분리 요청은 직접 실행과 함께 쓰면 실행 전에 거부�
     assertStringIncludes(result.stdout, "code: usage");
   }
   const skill = await runDelegate(["--skill"], base.deps);
-  assertEquals(skill.stdout.includes("--detach"), false);
+  assertStringIncludes(skill.stdout, "--detach");
   const help = await runDelegate(["prompt", "--help"], base.deps);
   assertStringIncludes(help.stdout, "--detach");
   assertEquals(base.fake.calls, []);
